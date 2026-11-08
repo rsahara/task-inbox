@@ -1,0 +1,9 @@
+[run]
+branch = True
+source = foundation/task_runtime
+patch = subprocess
+parallel = True
+
+[report]
+show_missing = True
+precision = 2

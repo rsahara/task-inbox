@@ -1,0 +1,25 @@
+# Python bytecode and local environments
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Coverage output
+.coverage
+.coverage.*
+htmlcov/
+
+# Generated distributions
+/build/
+/dist/
+*.pyz
+
+# Local environment settings and credentials
+.env
+.env.*
+!.env.example
+/.aws/
+/.ssh/
+
+# macOS metadata
+.DS_Store
