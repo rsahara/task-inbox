@@ -84,6 +84,13 @@ another clone with `io flush`. Delivery intents live on Git, not only on the VM.
 Consumers should call `io flush` before checking their inbox. Outbox records remain
 on authority for recovery; this release does not garbage-collect them.
 
+An inbox message ID collision never overwrites the existing message. `io flush`
+continues independent messages and records, returning `blocked` identities and
+`needs_attention=true` (CLI exit 2) for collisions. Publication/enqueue callers
+still fail when their own required delivery is blocked. Preserve the conflicting
+identities for inspection and use a new message ID for a corrected notification.
+Transport failures remain retryable errors.
+
 `signals.read_notice(store, message)` verifies the referenced authority commit,
 owner and record hash (or explicit removal evidence). Consumers reconcile against
 current data and revisions, so an old notice must not roll current state back.

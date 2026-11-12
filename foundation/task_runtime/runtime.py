@@ -562,7 +562,7 @@ def publish(store, operation_id, task_id, run_id, *, outcome=None, summary="", d
     result = _publish(store, operation_id, task_id, run_id, outcome=outcome,
                       summary=summary, discard_output=discard_output, completion_record=completion_record)
     from . import outbox
-    delivery = outbox.flush(store, task_id=task_id, publication_id=operation_id)
+    delivery = outbox.require_delivery(outbox.flush(store, task_id=task_id, publication_id=operation_id))
     if outcome:
         from . import maintenance
         maintenance.maintain(store, task_id, run_id)

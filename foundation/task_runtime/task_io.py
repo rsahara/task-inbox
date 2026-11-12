@@ -9,6 +9,10 @@ from .store import CONTROL, Snapshot, Store, TaskError, digest, encode, identity
 MAX_BYTES = 262144
 
 
+class MessageConflict(TaskError):
+    """An immutable inbox identity already belongs to different content."""
+
+
 def prefix(config):
     value = config.get('io_ref_prefix', 'task-io')
     reserved = (config['authority_ref'], 'refs/heads/' + config['ref_prefix'])
@@ -125,7 +129,7 @@ def send(store, operation_id, task_id, message_id, kind, payload):
     def apply(snapshot):
         prior = snapshot.json(path)
         if prior and prior != message:
-            raise TaskError('Message ID already used with different content')
+            raise MessageConflict('Message ID already used with different content')
         return ({path: encode(message)} if not prior else {}), message
     stream.transact(operation_id, dict(kind='io-send', message=message), apply)
     snapshot = stream.snapshot()

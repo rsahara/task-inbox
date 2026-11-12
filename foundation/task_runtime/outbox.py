@@ -102,6 +102,8 @@ def prepare(store, task_id, run_id, operation_id, values):
 def capture(snapshot, run, source, touched, publication_id):
     """Called inside the publication CAS; data and delivery records commit together."""
     from . import runtime
+    if not enabled(snapshot):
+        return {}
     prefix = runtime.data_prefix(run, run['task_id']) + INTENTS
     changes = {}
     for path in touched:
@@ -112,9 +114,9 @@ def capture(snapshot, run, source, touched, publication_id):
             continue
         value = json.loads(raw) if raw is not None else None
         old = snapshot.json(path)
-        if old and old.get('kind') == 'task-inbox-outbox':
+        if isinstance(old, dict) and old.get('kind') == 'task-inbox-outbox':
             raise TaskError('Published outbox intents are immutable')
-        if not value or value.get('kind') != 'task-inbox-outbox':
+        if not isinstance(value, dict) or value.get('kind') != 'task-inbox-outbox':
             continue  # Application records from before outbox adoption are data.
         if value.get('schema_version') != 1 or value.get('task_id') != run['task_id']:
             raise TaskError('Outbox intent owner/schema differs')
@@ -132,7 +134,14 @@ def enqueue(store, operation_id, task_id, source_commit, values):
             raise TaskError('Outbox source must be a saved authority commit')
         return record(snapshot, task_id, operation_id, values, source_commit=source_commit), {'queued': True}
     result = store.transact(operation_id, request, apply)
-    return dict(result, **flush(store, operation_id=operation_id, task_id=task_id))
+    return dict(result, **require_delivery(flush(store, operation_id=operation_id, task_id=task_id)))
+
+
+def require_delivery(result):
+    """Publication callers must not report acceptance for a blocked delivery."""
+    if result.get('blocked'):
+        raise TaskError('Outbox message ID already has different content; inspect io flush')
+    return result
 
 
 def flush(store, *, operation_id=None, task_id=None, publication_id=None):
@@ -145,6 +154,10 @@ def flush(store, *, operation_id=None, task_id=None, publication_id=None):
     inboxes = {}
     origins = None
     delivered, selected = 0, 0
+    blocked = []
+    def conflict(path, item):
+        blocked.append(dict(record_path=path, task_id=item['task_id'],
+                            message_id=item['message_id'], reason='message_id_conflict'))
     for path in sorted(p for p in snapshot.entries if p.startswith(PREFIX) and p.endswith('.json')):
         value = snapshot.json(path)
         if ((operation_id is not None and value['operation_id'] != operation_id) or
@@ -183,12 +196,19 @@ def flush(store, *, operation_id=None, task_id=None, publication_id=None):
                 missing.append(item)
             elif (existing.get('kind') != item['kind'] or
                   existing.get('payload') != dict(item['payload'], publication_commit=source_commit)):
-                raise TaskError('Outbox message ID already has different content')
+                conflict(path, item)
         if not missing:
             continue
         for item in missing:
             payload = dict(item['payload'], publication_commit=source_commit)
             send_id = 'outbox-' + digest([path, item['task_id'], item['message_id']])[:64]
-            task_io.send(store, send_id, item['task_id'], item['message_id'], item['kind'], payload)
+            try:
+                task_io.send(store, send_id, item['task_id'], item['message_id'], item['kind'], payload)
+            except task_io.MessageConflict:
+                conflict(path, item)
+                continue
             delivered += 1
-    return dict(required=bool(selected), delivered=delivered)
+    result = dict(required=bool(selected), delivered=delivered)
+    if blocked:
+        result.update(needs_attention=True, blocked=blocked)
+    return result

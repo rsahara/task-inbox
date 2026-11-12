@@ -127,6 +127,56 @@ class SignalTest(RuntimeCase):
         saved=Snapshot(self.sb,message['payload']['publication_commit'])
         self.assertEqual(saved.read('tasks/source/data/report.json'),b'{"result":"ready"}')
 
+    def test_conflicting_inbox_id_does_not_poison_other_recovery_deliveries(self):
+        from task_runtime.store import digest
+        task_io.send(self.sa, 'original', 'assessor', 'collision', 'manual', {'original':True})
+        commit = self.sa.snapshot().commit
+        bad = [dict(task_id='assessor', message_id='collision', kind='report', payload={}),
+               dict(task_id='viewer', message_id='sibling', kind='report', payload={})]
+        with self.assertRaisesRegex(TaskError, 'different content'):
+            outbox.enqueue(self.sa, 'poison', 'source', commit, bad)
+        self.assertEqual(len(task_io.pending(self.sb, 'viewer')['messages']), 1)
+        operation = next('healthy-' + str(i) for i in range(100)
+                         if digest(['source', 'healthy-' + str(i), 'intent']) > digest(['source', 'poison', 'intent']))
+        healthy = [dict(task_id='assessor', message_id='healthy', kind='report', payload={})]
+        with patch.object(task_io, 'send', side_effect=TaskError('Temporary delivery failure')):
+            with self.assertRaisesRegex(TaskError, 'Temporary delivery'):
+                outbox.enqueue(self.sa, operation, 'source', commit, healthy)
+        result = outbox.flush(self.sb)
+        self.assertEqual(result['delivered'], 1)
+        self.assertTrue(result['needs_attention'])
+        self.assertEqual(result['blocked'][0]['message_id'], 'collision')
+        messages = task_io.pending(self.sb, 'assessor')['messages']
+        self.assertEqual({m['id'] for m in messages}, {'collision', 'healthy'})
+        self.assertEqual(next(m['payload'] for m in messages if m['id']=='collision'), {'original':True})
+        self.assertEqual(outbox.flush(self.sb)['delivered'], 0)
+        result = self.command('python3', str(Path(__file__).resolve().parents[1]/'bin/task-inbox'),
+                              '--repo', str(self.b), 'io', 'flush', ok=False)
+        self.assertEqual(result.returncode, 2)
+        self.assertEqual(json.loads(result.stdout)['blocked'][0]['message_id'], 'collision')
+
+    def test_inbox_conflict_during_delivery_still_delivers_siblings(self):
+        send = task_io.send
+        def race(store, operation, task_id, message_id, kind, payload):
+            if message_id == 'raced':
+                send(store, 'manual-race', task_id, message_id, 'manual', {'original':True})
+            return send(store, operation, task_id, message_id, kind, payload)
+        values = [dict(task_id='assessor', message_id='raced', kind='report', payload={}),
+                  dict(task_id='viewer', message_id='unaffected', kind='report', payload={})]
+        with patch.object(task_io, 'send', side_effect=race):
+            with self.assertRaisesRegex(TaskError, 'different content'):
+                outbox.enqueue(self.sa, 'raced-outbox', 'source', self.sa.snapshot().commit, values)
+        self.assertEqual(task_io.pending(self.sb, 'viewer')['messages'][0]['id'], 'unaffected')
+
+    def test_non_outbox_json_remains_application_data_after_enable(self):
+        work = self.prepared()
+        path = work / 'tasks/source/data/notification-outbox/application.json'
+        path.parent.mkdir(parents=True)
+        for operation, value in [('list-data', [{'event':'one'}]), ('number-data', 42)]:
+            path.write_bytes(encode(value))
+            result = self.publish(operation)
+            self.assertFalse(result['notifications']['required'])
+
     def test_schema10_and_subscription_reject_self_delivery(self):
         self.assertEqual(self.sa.snapshot().json('.task-system/config.json')['schema_version'],10)
         self.prepared()
@@ -186,6 +236,15 @@ class SignalTest(RuntimeCase):
 
 
 class EnableSignalsTest(RuntimeCase):
+    def test_schema9_publish_does_not_interpret_application_outbox_paths(self):
+        self.add('source'); self.start('legacy', task='source')
+        work = self.prepare('legacy', task='source')
+        relative = 'tasks/source/data/notification-outbox/application.json'
+        self.output(work, relative, encode([{'event':'application-event'}]))
+        runtime.publish(self.sa, 'save-legacy', 'source', 'legacy', outcome='succeeded')
+        self.assertEqual(self.sb.snapshot().json(relative), [{'event':'application-event'}])
+        self.assertEqual(self.sb.snapshot().json('.task-system/config.json')['schema_version'], 9)
+
     def test_enable_seeds_evidence_for_existing_signals(self):
         self.add('source')
         relative = 'tasks/source/data/signals/check.json'
