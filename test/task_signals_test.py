@@ -98,7 +98,7 @@ class SignalTest(RuntimeCase):
         message=task_io.pending(self.sb,'assessor')['messages'][0]
         self.assertEqual(message['kind'],'report-updated')
         saved=Snapshot(self.sb,message['payload']['publication_commit'])
-        self.assertEqual(saved.read('tasks/source/data/report.json'),content.read_bytes())
+        self.assertEqual(saved.read('tasks/source/data/report.json'),b'{"result":"ready"}')
 
     def test_schema10_and_subscription_reject_self_delivery(self):
         self.assertEqual(self.sa.snapshot().json('.task-system/config.json')['schema_version'],10)

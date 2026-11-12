@@ -1,6 +1,7 @@
 """Durable, publication-bound inbox delivery. Payload meaning belongs to callers."""
 from pathlib import Path
 import json
+import re
 
 from .store import CONTROL, Snapshot, TaskError, atomic_json, digest, encode, git, identity
 
@@ -38,7 +39,7 @@ def messages(snapshot, values):
     return values
 
 
-def record(snapshot, task_id, operation_id, values, *, source_commit=None, channel="intent"):
+def record(snapshot, task_id, operation_id, values, *, source_commit=None, channel="intent", publication_id=None):
     from . import runtime
     require_enabled(snapshot)
     runtime.load_task(snapshot, task_id)
@@ -47,7 +48,7 @@ def record(snapshot, task_id, operation_id, values, *, source_commit=None, chann
     values = messages(snapshot, values)
     key = digest([task_id, operation_id, channel])
     body = dict(schema_version=1, repository_id=config['repository_id'], authority_ref=config['authority_ref'],
-                task_id=task_id, operation_id=operation_id, channel=channel, messages=values, source_commit=source_commit)
+                task_id=task_id, operation_id=operation_id, publication_id=publication_id or operation_id, channel=channel, messages=values, source_commit=source_commit)
     path = PREFIX + key + '.json'
     if snapshot.json(path) not in (None, body):
         raise TaskError('Outbox record is immutable')
@@ -79,7 +80,7 @@ def prepare(store, task_id, run_id, operation_id, values):
     return relative
 
 
-def capture(snapshot, run, source, touched):
+def capture(snapshot, run, source, touched, publication_id):
     """Called inside the publication CAS; data and delivery records commit together."""
     from . import runtime
     prefix = runtime.data_prefix(run, run['task_id']) + INTENTS
@@ -98,12 +99,14 @@ def capture(snapshot, run, source, touched):
             continue  # Application records from before outbox adoption are data.
         if value.get('schema_version') != 1 or value.get('task_id') != run['task_id']:
             raise TaskError('Outbox intent owner/schema differs')
-        changes.update(record(snapshot, run['task_id'], value['operation_id'], value['messages']))
+        changes.update(record(snapshot, run['task_id'], value['operation_id'], value['messages'], publication_id=publication_id))
     return changes
 
 
 def enqueue(store, operation_id, task_id, source_commit, values):
     """Reference data already saved on authority; retry with the same operation ID."""
+    if not isinstance(source_commit, str) or not re.fullmatch(r'[a-f0-9]{40}|[a-f0-9]{64}', source_commit):
+        raise TaskError('Outbox source must be a full commit ID')
     request = dict(kind='outbox-enqueue', task_id=task_id, source_commit=source_commit, messages=values)
     def apply(snapshot):
         if not git(store.repo, 'merge-base', '--is-ancestor', source_commit, snapshot.commit, predicate=True):
@@ -113,7 +116,7 @@ def enqueue(store, operation_id, task_id, source_commit, values):
     return dict(result, **flush(store, operation_id=operation_id, task_id=task_id))
 
 
-def flush(store, *, operation_id=None, task_id=None):
+def flush(store, *, operation_id=None, task_id=None, publication_id=None):
     """Recover delivery from Git, including partial fanout and lost responses."""
     from . import task_io
     snapshot = store.snapshot()
@@ -126,6 +129,8 @@ def flush(store, *, operation_id=None, task_id=None):
         value = snapshot.json(path)
         if ((operation_id is not None and value['operation_id'] != operation_id) or
                 (task_id is not None and value['task_id'] != task_id)):
+            continue
+        if publication_id is not None and value.get('publication_id') != publication_id:
             continue
         selected += 1
         if (value.get('schema_version') != 1 or value.get('repository_id') != config['repository_id'] or
