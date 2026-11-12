@@ -82,6 +82,33 @@ class SignalTest(RuntimeCase):
         with self.assertRaisesRegex(TaskError,'starts at revision 1'):
             self.publish()
 
+    def test_type_change_notifies_previous_and_current_subscribers_once(self):
+        self.add('planner')
+        signals.subscribe(self.sa, 'planner-type', 'source', 'planner', 'opportunity')
+        signals.subscribe(self.sa, 'viewer-new-type', 'source', 'viewer', 'opportunity')
+        self.prepared(); self.publish(signal=value())
+        self.publish('change-type', signal=value(2, type='opportunity'))
+        for task_id, count in [('assessor', 2), ('viewer', 2), ('planner', 1)]:
+            messages = task_io.pending(self.sb, task_id)['messages']
+            self.assertEqual(len(messages), count)
+            changed = next(m for m in messages if m['payload']['revision'] == 2)
+            self.assertEqual(signals.read_notice(self.sb, changed)['type'], 'opportunity')
+
+    def test_durable_evidence_survives_tombstone_removal_and_path_reuse(self):
+        work = self.prepared()
+        ended = value(status='resolved', resolution='Verified')
+        self.publish(signal=ended)
+        before = signals.catalog(self.sb.snapshot(), 'source', include_removed=True)['check']
+        evidence_path = before['evidence_path']
+        self.assertEqual(signals.read_value(self.sb.snapshot(), evidence_path), ended)
+        (work / 'tasks/source/data/signals/check.json').write_bytes(encode(value(id='replacement')))
+        self.publish('replace-ended')
+        self.assertNotIn('check', signals.catalog(self.sb.snapshot(), 'source'))
+        after = signals.catalog(self.sb.snapshot(), 'source', include_removed=True)['check']
+        self.assertTrue(after['removed'])
+        self.assertEqual(after['evidence_path'], evidence_path)
+        self.assertEqual(signals.read_value(self.sb.snapshot(), evidence_path), ended)
+
     def test_active_signal_cannot_disappear_silently(self):
         work=self.prepared();self.publish(signal=value())
         (work/'tasks/source/data/signals/check.json').unlink()
@@ -155,6 +182,14 @@ class SignalTest(RuntimeCase):
 
 
 class EnableSignalsTest(RuntimeCase):
+    def test_enable_seeds_evidence_for_existing_signals(self):
+        self.add('source')
+        relative = 'tasks/source/data/signals/check.json'
+        self.sa.transact('fixture-signal', {'kind':'fixture'}, lambda s: ({relative: encode(value())}, {}))
+        signals.enable(self.sa, 'enable')
+        record = signals.catalog(self.sb.snapshot(), 'source', include_removed=True)['check']
+        self.assertEqual(signals.read_value(self.sb.snapshot(), record['evidence_path']), value())
+
     def test_enable_requires_drained_runs_and_fences_old_schema(self):
         self.add('source'); self.start('old', task='source')
         with self.assertRaisesRegex(TaskError, 'all runs'):

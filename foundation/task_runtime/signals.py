@@ -24,6 +24,9 @@ def enable(store, operation_id):
         config = json.loads(changes.get(CONTROL + '/config.json', encode(config)))
         config['schema_version'] = 10
         changes[CONTROL + '/config.json'] = encode(config)
+        for task_id in layout.tasks(snapshot):
+            for signal_id, record in catalog(snapshot, task_id).items():
+                changes[HEADS + task_id + '/' + signal_id + '.json'] = encode(record)
         return changes, {'enabled': True}
     return store.transact(operation_id, {'kind':'signal-enable'}, apply)
 
@@ -48,7 +51,7 @@ def path(snapshot, task_id):
     return runtime.data_prefix(definition, task_id, runtime.root(task_id, snapshot)) + 'signals/'
 
 
-def catalog(snapshot, task_id):
+def catalog(snapshot, task_id, *, include_removed=False):
     prefix = path(snapshot, task_id)
     result = {}
     for name in sorted(p for p in snapshot.entries if p.startswith(prefix) and p.endswith('.json')):
@@ -56,7 +59,33 @@ def catalog(snapshot, task_id):
         if value['id'] in result:
             raise TaskError('Duplicate signal ID')
         result[value['id']] = dict(value=value, path=name, sha256=hashlib.sha256(snapshot.read(name)).hexdigest())
+    if include_removed:
+        heads = HEADS + task_id + '/'
+        for name in sorted(p for p in snapshot.entries if p.startswith(heads) and p.endswith('.json')):
+            record = snapshot.json(name)
+            value = validate(record['value'], task_id)
+            if name != heads + value['id'] + '.json':
+                raise TaskError('Signal head identity mismatch')
+            current = result.get(value['id'])
+            if record.get('removed') and current is None:
+                if value['status'] == 'active':
+                    raise TaskError('Removed signal requires an ended version')
+                result[value['id']] = dict(record, evidence_path=name)
+            elif current and all(current[k] == record.get(k) for k in ('value', 'path', 'sha256')):
+                current['evidence_path'] = name
     return result
+
+
+def read_value(snapshot, name):
+    """Read a signal's logical value from task data or its durable evidence path."""
+    record = snapshot.json(name)
+    value = record.get('value') if isinstance(record, dict) and name.startswith(HEADS) else record
+    if not isinstance(value, dict):
+        raise TaskError('Missing signal evidence')
+    validate(value, identity(value.get('task_id'), 'source task ID'))
+    if name.startswith(HEADS) and name != HEADS + value['task_id'] + '/' + value['id'] + '.json':
+        raise TaskError('Signal head identity mismatch')
+    return value
 
 
 def put(store, task_id, run_id, value):
@@ -137,8 +166,9 @@ def publication(snapshot, run, source, touched, operation_id):
             revision=value['revision'], type=value['type'], status=value['status'],
             removed=new is None, path=selected['path'], sha256=selected['sha256'])
         message_id = 'signal-' + digest([task_id, operation_id, signal_id])[:64]
+        types = {None, value['type'], previous['type'] if previous else value['type']}
         for target in sorted({s['consumer'] for s in subscriptions if s['task_id'] == task_id and
-                              s.get('type') in (None, value['type'])}):
+                              s.get('type') in types}):
             values.append(dict(task_id=target, message_id=message_id, kind=KIND, payload=payload))
     if values:
         changes.update(outbox.record(snapshot, task_id, operation_id, values, channel="signals"))

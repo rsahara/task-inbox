@@ -55,6 +55,16 @@ Removal retains its last published version in the control ledger and Git history
 recreation requires a newer revision. Missing data is never inferred to mean a
 resolved active signal. Duplicate IDs in one producer fail publication.
 
+Python consumers can use `signals.catalog(snapshot, task_id, include_removed=True)`
+to retain explicitly removed ended records. Its `evidence_path`, when available,
+points to the durable control-ledger version even before removal. Read the logical
+signal with `signals.read_value(snapshot, evidence_path)`; removing a tombstone
+does not change that logical value. Default catalogs and `signal list` show only
+current task data. Enable seeds evidence for existing signals.
+
+A newer revision may change type. Both old-type and new-type subscribers receive
+that change once, allowing old-type consumers to remove it from their selection.
+
 Both CLI and Python `runtime.publish` enforce the contract, including when a worker
 edits signal files directly. A discarded output does not update signals or queue
 notifications. A no-change publication emits no signal event.
