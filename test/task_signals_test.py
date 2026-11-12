@@ -106,6 +106,17 @@ class SignalTest(RuntimeCase):
         with self.assertRaisesRegex(TaskError,'own signals'):
             signals.subscribe(self.sa,'self','source','source')
 
+    def test_existing_message_cannot_silently_refer_to_another_commit(self):
+        first = self.sa.snapshot().commit
+        messages = [dict(task_id='assessor', message_id='same', kind='report', payload={'path':'report.json'})]
+        outbox.enqueue(self.sa, 'first-reference', 'source', first, messages)
+        self.sa.transact('advance', {'kind':'fixture'}, lambda s: ({'report.json':b'new contents'}, {}))
+        second = self.sa.snapshot().commit
+        with self.assertRaisesRegex(TaskError, 'different content'):
+            outbox.enqueue(self.sa, 'second-reference', 'source', second, messages)
+        self.assertEqual(task_io.pending(self.sa, 'assessor')['messages'][0]['payload']['publication_commit'], first)
+        self.assertEqual(outbox.flush(self.sa)['delivered'], 0)
+
     def test_cli_and_indexed_task_paths(self):
         result=self.command('python3',str(Path(__file__).resolve().parents[1]/'bin/task-inbox'),
                             '--repo',str(self.a),'signal','list','--task','source')

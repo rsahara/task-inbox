@@ -3,9 +3,10 @@ from pathlib import Path
 import json
 import re
 
-from .store import CONTROL, Snapshot, TaskError, atomic_json, digest, encode, git, identity
+from .store import CONTROL, TaskError, atomic_json, digest, encode, git, identity
 
 PREFIX = CONTROL + '/outbox/'
+BINDINGS = CONTROL + '/outbox-messages/'
 INTENTS = 'notification-outbox/'
 
 
@@ -52,7 +53,17 @@ def record(snapshot, task_id, operation_id, values, *, source_commit=None, chann
     path = PREFIX + key + '.json'
     if snapshot.json(path) not in (None, body):
         raise TaskError('Outbox record is immutable')
-    return {path: encode(body)}
+    changes = {path: encode(body)}
+    for item in values:
+        binding_path = BINDINGS + item['task_id'] + '/' + item['message_id'] + '.json'
+        binding = dict(record_path=path, source_commit=source_commit, message=item)
+        previous = snapshot.json(binding_path)
+        if previous and previous != binding:
+            if not (source_commit and previous.get('source_commit') == source_commit and previous.get('message') == item):
+                raise TaskError('Outbox message ID already has different content or publication')
+        elif not previous:
+            changes[binding_path] = encode(binding)
+    return changes
 
 
 def prepare(store, task_id, run_id, operation_id, values):
@@ -124,6 +135,7 @@ def flush(store, *, operation_id=None, task_id=None, publication_id=None):
         return dict(required=False, delivered=0)
     config = snapshot.json(CONTROL + '/config.json')
     inboxes = {}
+    origins = None
     delivered, selected = 0, 0
     for path in sorted(p for p in snapshot.entries if p.startswith(PREFIX) and p.endswith('.json')):
         value = snapshot.json(path)
@@ -136,6 +148,23 @@ def flush(store, *, operation_id=None, task_id=None, publication_id=None):
         if (value.get('schema_version') != 1 or value.get('repository_id') != config['repository_id'] or
                 value.get('authority_ref') != config['authority_ref']):
             raise TaskError('Outbox belongs to another authority')
+        if origins is None:
+            store.require_history()
+            origins = {}
+            commit = None
+            history = git(store.repo, 'log', '--full-history', '--no-merges', '--diff-filter=A',
+                          '--format=commit:%H', '--name-only', snapshot.commit, '--', ':(literal)' + PREFIX)
+            for line in history.splitlines():
+                if line.startswith('commit:'):
+                    commit = line[7:]
+                elif line.startswith(PREFIX):
+                    origins[line] = commit
+        origin = origins.get(path)
+        if not origin or git(store.repo, 'show', origin + ':' + path, binary=True, strip=False) != snapshot.read(path):
+            raise TaskError('Outbox record changed since its publication')
+        source_commit = value.get('source_commit') or origin
+        if not git(store.repo, 'merge-base', '--is-ancestor', source_commit, snapshot.commit, predicate=True):
+            raise TaskError('Outbox source is outside authority history')
         missing = []
         for item in messages(snapshot, value['messages']):
             target = item['task_id']
@@ -145,18 +174,10 @@ def flush(store, *, operation_id=None, task_id=None, publication_id=None):
             if existing is None:
                 missing.append(item)
             elif (existing.get('kind') != item['kind'] or
-                  {k:v for k,v in existing.get('payload', {}).items() if k != 'publication_commit'} != item['payload']):
+                  existing.get('payload') != dict(item['payload'], publication_commit=source_commit)):
                 raise TaskError('Outbox message ID already has different content')
         if not missing:
             continue
-        store.require_history()
-        origin = git(store.repo, 'log', '--full-history', '--no-merges', '--diff-filter=A', '-1',
-                     '--format=%H', snapshot.commit, '--', ':(literal)' + path)
-        if not origin or Snapshot(store, origin).json(path) != value:
-            raise TaskError('Outbox record changed since its publication')
-        source_commit = value.get('source_commit') or origin
-        if not git(store.repo, 'merge-base', '--is-ancestor', source_commit, snapshot.commit, predicate=True):
-            raise TaskError('Outbox source is outside authority history')
         for item in missing:
             payload = dict(item['payload'], publication_commit=source_commit)
             send_id = 'outbox-' + digest([path, item['task_id'], item['message_id']])[:64]
