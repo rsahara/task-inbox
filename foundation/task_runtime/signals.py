@@ -161,7 +161,7 @@ def read_notice(store, message):
     original = Snapshot(store, commit)
     if value.get('removed') is True:
         record = original.json(HEADS + task_id + '/' + signal_id + '.json')
-        if not record or record.get('removed') is not True or original.read(record['path']) is not None:
+        if not record or record.get('removed') is not True or signal_id in catalog(original, task_id):
             raise TaskError('Missing signal removal evidence')
     else:
         record = catalog(original, task_id).get(signal_id)

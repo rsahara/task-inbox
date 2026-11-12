@@ -660,8 +660,9 @@ def _publish(store, operation_id, task_id, run_id, *, outcome=None, summary="", 
                 runtime["data_revision"] += 1
             if not discard_output:
                 from . import outbox, signals
-                changes.update(outbox.capture(snapshot, run, source, preparation["touched"], operation_id))
-                changes.update(signals.publication(snapshot, run, source, preparation["touched"], operation_id))
+                queued = outbox.capture(snapshot, run, source, preparation["touched"], operation_id)
+                outbox.merge(queued, signals.publication(snapshot, run, source, preparation["touched"], operation_id))
+                changes.update(queued)
             updated = dict(snapshot.entries)
             for path, entry in changes.items():
                 if entry is None:

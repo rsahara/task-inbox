@@ -66,6 +66,14 @@ def record(snapshot, task_id, operation_id, values, *, source_commit=None, chann
     return changes
 
 
+def merge(left, right):
+    """Validate all records/bindings produced by the same authority transaction."""
+    if any(path in left and left[path] != value for path, value in right.items()):
+        raise TaskError('Conflicting outbox messages in one publication')
+    left.update(right)
+    return left
+
+
 def prepare(store, task_id, run_id, operation_id, values):
     """Write an intent into the owning workspace, before publication."""
     from . import runtime
@@ -110,7 +118,7 @@ def capture(snapshot, run, source, touched, publication_id):
             continue  # Application records from before outbox adoption are data.
         if value.get('schema_version') != 1 or value.get('task_id') != run['task_id']:
             raise TaskError('Outbox intent owner/schema differs')
-        changes.update(record(snapshot, run['task_id'], value['operation_id'], value['messages'], publication_id=publication_id))
+        merge(changes, record(snapshot, run['task_id'], value['operation_id'], value['messages'], publication_id=publication_id))
     return changes
 
 

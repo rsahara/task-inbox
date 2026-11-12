@@ -117,6 +117,37 @@ class SignalTest(RuntimeCase):
         self.assertEqual(task_io.pending(self.sa, 'assessor')['messages'][0]['payload']['publication_commit'], first)
         self.assertEqual(outbox.flush(self.sa)['delivered'], 0)
 
+    def test_conflicting_intents_are_rejected_before_finishing(self):
+        self.prepared()
+        for operation, payload in [('one', {'value':1}), ('two', {'value':2})]:
+            outbox.prepare(self.sa, 'source', 'run', operation,
+                           [dict(task_id='assessor', message_id='conflict', kind='report', payload=payload)])
+        with self.assertRaisesRegex(TaskError, 'Conflicting outbox'):
+            self.publish(outcome='succeeded')
+        self.assertEqual(runtime.check(self.sb, 'source', 'run')['status'], 'running')
+        self.assertFalse(task_io.pending(self.sb, 'assessor')['messages'])
+
+    def test_signal_and_application_intent_cannot_bind_the_same_message(self):
+        from task_runtime.store import digest
+        self.prepared(); signals.put(self.sa, 'source', 'run', value())
+        message_id = 'signal-' + digest(['source','publish','check'])[:64]
+        outbox.prepare(self.sa, 'source', 'run', 'intent',
+            [dict(task_id='assessor',message_id=message_id,kind='report',payload={})])
+        with self.assertRaisesRegex(TaskError, 'Conflicting outbox'):
+            self.publish(outcome='succeeded')
+        self.assertEqual(runtime.check(self.sb, 'source', 'run')['status'], 'running')
+
+    def test_ended_signal_path_can_be_reused_for_another_identity(self):
+        work = self.prepared()
+        self.publish(signal=value(status='resolved', resolution='Verified'))
+        (work / 'tasks/source/data/signals/check.json').write_bytes(encode(value(id='replacement')))
+        self.publish('replace-path')
+        pending = task_io.pending(self.sb,'assessor')['messages']
+        self.assertEqual(len(pending),3)
+        for message in pending:
+            signals.read_notice(self.sb,message)
+        self.assertEqual(set(signals.catalog(self.sb.snapshot(),'source')), {'replacement'})
+
     def test_cli_and_indexed_task_paths(self):
         result=self.command('python3',str(Path(__file__).resolve().parents[1]/'bin/task-inbox'),
                             '--repo',str(self.a),'signal','list','--task','source')
