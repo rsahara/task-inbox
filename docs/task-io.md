@@ -78,3 +78,9 @@ When external publication overwrites a live URL, a Git generation check alone ca
 python3 -m unittest discover -s test -p task_io_test.py
 python3 -m unittest discover -s test -p task_runtime_test.py
 ```
+
+## Signal and application update delivery
+
+[Task signals](task-signals.md) add Git-backed typed records and durable outbox
+delivery. `io flush` recovers pending deliveries from any clone. It neither
+launches consumers nor acknowledges their messages.

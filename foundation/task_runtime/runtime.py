@@ -561,10 +561,12 @@ def checkpoint_ref(store, ref, source):
 def publish(store, operation_id, task_id, run_id, *, outcome=None, summary="", discard_output=False, completion_record=None):
     result = _publish(store, operation_id, task_id, run_id, outcome=outcome,
                       summary=summary, discard_output=discard_output, completion_record=completion_record)
+    from . import outbox
+    delivery = outbox.flush(store, task_id=task_id)
     if outcome:
         from . import maintenance
         maintenance.maintain(store, task_id, run_id)
-    return result
+    return dict(result, notifications=delivery)
 
 
 def _publish(store, operation_id, task_id, run_id, *, outcome=None, summary="", discard_output=False, completion_record=None):
@@ -656,6 +658,10 @@ def _publish(store, operation_id, task_id, run_id, *, outcome=None, summary="", 
                         raise TaskError("Previously saved run artifact changed")
             if 'data_revision' in runtime and any(p.startswith(data_prefix(run, task_id)) for p in changes):
                 runtime["data_revision"] += 1
+            if not discard_output:
+                from . import outbox, signals
+                changes.update(outbox.capture(snapshot, run, source, preparation["touched"]))
+                changes.update(signals.publication(snapshot, run, source, preparation["touched"], operation_id))
             updated = dict(snapshot.entries)
             for path, entry in changes.items():
                 if entry is None:

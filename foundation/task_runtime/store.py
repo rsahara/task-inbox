@@ -218,7 +218,7 @@ class Store:
         return snapshot
 
     def validate_config(self, config):
-        if (not config or config.get("schema_version") not in (2, 3, 4, 5, 6, 7, 8, 9) or config.get("authority_ref") != self.ref or
+        if (not config or config.get("schema_version") not in (2, 3, 4, 5, 6, 7, 8, 9, 10) or config.get("authority_ref") != self.ref or
                 (config.get('schema_version', 0) >= 7 and config.get('workspace_provenance_protocol') != 1) or
                 (config.get("schema_version") in (3, 4) and config.get("lease_protocol") != 1) or
                 (config.get("schema_version") == 4 and config.get("generation_timeout_protocol") != 1)):

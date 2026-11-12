@@ -122,6 +122,13 @@ Distributions include license notices and exclude task data and credentials.
 Copied installations run independently of this repository. See
 [distribution and customization](docs/task-runtime.md#independent-company-use-and-customization).
 
+## Task signals
+
+Runtime 2.12 adds optional typed task signals, configurable inbox subscriptions,
+and durable outbox recovery. Both publish and finish deliver changes from Git.
+See [signals and migration](docs/task-signals.md); enable schema 10 only after
+all deployed readers/writers are updated and existing runs have drained.
+
 ## Documentation
 
 | Topic | Guide |
