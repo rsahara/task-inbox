@@ -156,7 +156,7 @@ def dispatch(args):
         if args.action == 'enable':
             return signals.enable(store, operation)
         if args.action == 'list':
-            return signals.catalog(store.snapshot(), args.task)
+            return {'signals': signals.catalog(store.snapshot(), args.task)}
         if args.action == 'put':
             return signals.put(store, args.task, args.run_id, json.loads(Path(args.file).read_text()))
         return signals.subscribe(store, operation, args.task, args.consumer, args.type)

@@ -178,7 +178,11 @@ class SignalTest(RuntimeCase):
     def test_cli_and_indexed_task_paths(self):
         result=self.command('python3',str(Path(__file__).resolve().parents[1]/'bin/task-inbox'),
                             '--repo',str(self.a),'signal','list','--task','source')
-        self.assertEqual(json.loads(result.stdout),{})
+        self.assertEqual(json.loads(result.stdout),{'signals':{}})
+        self.prepared(); self.publish(signal=value(id='needs_attention'))
+        result=self.command('python3',str(Path(__file__).resolve().parents[1]/'bin/task-inbox'),
+                            '--repo',str(self.a),'signal','list','--task','source')
+        self.assertEqual(json.loads(result.stdout)['signals']['needs_attention']['value'], value(id='needs_attention'))
 
 
 class EnableSignalsTest(RuntimeCase):

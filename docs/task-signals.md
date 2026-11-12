@@ -48,8 +48,8 @@ After normal `run start` and `run prepare`, create a record outside the reposito
 Use `signal put --task producer --run-id RUN --file /path/to/signal.json`, followed
 by normal `run publish` or `run finish`. Put changes the owning prepared workspace;
 it does not push data or grant a new execution slot. `signal list --task producer`
-reads saved signals. Additional JSON fields are allowed. IDs are stable within a
-task and revision is a positive integer. Changes require a newer revision. Publish
+returns saved records under the `signals` key. Additional JSON fields are allowed.
+IDs are stable within a task and revision is a positive integer. Changes require a newer revision. Publish
 `resolved` or `withdrawn` plus a nonempty `resolution` before removing a signal.
 Removal retains its last published version in the control ledger and Git history;
 recreation requires a newer revision. Missing data is never inferred to mean a
