@@ -5,7 +5,7 @@ import json
 from pathlib import Path
 
 from . import layout, runtime
-from .store import CONTROL, TaskError, atomic_json, digest, encode, identity
+from .store import CONTROL, TaskError, atomic_json, digest, encode, identity, git
 
 SUBSCRIPTIONS = CONTROL + '/signal-subscriptions.json'
 KIND = 'signal-changed'
@@ -83,7 +83,14 @@ def put(store, task_id, run_id, value):
     state = runtime.local_state(store, task_id, run_id)
     if not state.is_file():
         raise TaskError('Prepare the run before updating signals')
-    work = Path(json.loads(state.read_text())['path'])
+    local = json.loads(state.read_text())
+    if not local.get('prepared') or local.get('generation') != run['generation']:
+        raise TaskError('Prepare the run before updating signals')
+    work = Path(local['path'])
+    if (work.is_symlink() or not work.is_dir() or
+            git(work, 'rev-parse', '--show-toplevel') != str(work.resolve()) or
+            not git(work, 'merge-base', '--is-ancestor', run['source_head'], 'HEAD', predicate=True)):
+        raise TaskError('Prepared workspace is missing or changed')
     relative = runtime.data_prefix(run, task_id) + 'signals/' + value['id'] + '.json'
     previous = catalog(snapshot, task_id).get(value['id'])
     if previous and previous['path'] != relative:

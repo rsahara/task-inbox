@@ -91,6 +91,32 @@ class SignalTest(RuntimeCase):
         self.assertEqual(task_io.wake(self.sb, 'wake-viewer', 'viewer', 'worker', 'consumer')['run']['run_id'], 'consumer')
         self.assertEqual(len(task_io.pending(self.sb, 'viewer')['messages']), 1)
 
+    def test_put_after_interrupted_prepare_preserves_retry(self):
+        self.start('run', task='source')
+        original = runtime.git
+        def interrupted(repo, *args, **kwargs):
+            if args[:2] == ('worktree', 'add'):
+                raise OSError('interrupted prepare')
+            return original(repo, *args, **kwargs)
+        with patch.object(runtime, 'git', side_effect=interrupted):
+            with self.assertRaisesRegex(OSError, 'interrupted prepare'):
+                self.prepare('run', task='source')
+        local = json.loads(runtime.local_state(self.sa, 'source', 'run').read_text())
+        self.assertFalse(local['prepared'])
+        with self.assertRaisesRegex(TaskError, 'Prepare the run'):
+            signals.put(self.sa, 'source', 'run', value())
+        self.assertFalse(Path(local['path']).exists())
+        self.prepare('run', task='source')
+        self.publish()
+        self.assertEqual(len(task_io.pending(self.sb, 'viewer')['messages']), 1)
+
+    def test_put_rejects_workspace_replaced_by_an_ordinary_directory(self):
+        work = self.prepared()
+        (work / '.git').unlink()
+        with self.assertRaises((TaskError, RuntimeError)):
+            signals.put(self.sa, 'source', 'run', value())
+        self.assertFalse((work / 'tasks/source/data/signals/check.json').exists())
+
     def test_list_before_subscription_and_late_subscription(self):
         self.add('late')
         self.prepared(); self.publish()
