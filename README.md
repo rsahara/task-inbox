@@ -125,7 +125,8 @@ Copied installations run independently of this repository. See
 ## Task signals
 
 Runtime 2.12 adds optional typed task signals, configurable inbox subscriptions,
-and durable outbox recovery. Both publish and finish deliver changes from Git.
+and inbox-based reconciliation. Publish, finish and task startup synchronize
+current state from Git without a delivery ledger.
 See [signals and migration](docs/task-signals.md); enable schema 10 only after
 all deployed readers/writers are updated and existing runs have drained.
 

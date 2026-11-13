@@ -290,7 +290,8 @@ def start(store, operation_id, task_id, runner_id, *, run_id=None, machine_id=No
             raise TaskError('Checkpoint-only continuation cannot use a business completion contract')
         from . import completion
         request['completion_contract'] = completion.contract(completion_contract)
-    from . import maintenance
+    from . import maintenance, signals
+    signals.require_delivery(signals.sync(store))
     maintenance.maintain(store, task_id)
     # A normal scheduled admission can reclaim eligible expired leases from
     # remote state alone. A replay only reads its historical receipt: it must
@@ -561,8 +562,8 @@ def checkpoint_ref(store, ref, source):
 def publish(store, operation_id, task_id, run_id, *, outcome=None, summary="", discard_output=False, completion_record=None):
     result = _publish(store, operation_id, task_id, run_id, outcome=outcome,
                       summary=summary, discard_output=discard_output, completion_record=completion_record)
-    from . import outbox
-    delivery = outbox.require_delivery(outbox.flush(store, task_id=task_id, publication_id=operation_id))
+    from . import signals
+    delivery = signals.require_delivery(signals.sync(store, task_id=task_id))
     if outcome:
         from . import maintenance
         maintenance.maintain(store, task_id, run_id)
@@ -659,10 +660,8 @@ def _publish(store, operation_id, task_id, run_id, *, outcome=None, summary="", 
             if 'data_revision' in runtime and any(p.startswith(data_prefix(run, task_id)) for p in changes):
                 runtime["data_revision"] += 1
             if not discard_output:
-                from . import outbox, signals
-                queued = outbox.capture(snapshot, run, source, preparation["touched"], operation_id)
-                outbox.merge(queued, signals.publication(snapshot, run, source, preparation["touched"], operation_id))
-                changes.update(queued)
+                from . import signals
+                signals.publication(snapshot, run, source, preparation["touched"], operation_id)
             updated = dict(snapshot.entries)
             for path, entry in changes.items():
                 if entry is None:

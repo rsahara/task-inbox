@@ -4,18 +4,24 @@ import hashlib
 import json
 from pathlib import Path
 
-from . import layout, runtime, outbox
+from . import layout, runtime
 from .store import CONTROL, TaskError, atomic_json, digest, encode, identity
 
 SUBSCRIPTIONS = CONTROL + '/signal-subscriptions.json'
 KIND = 'signal-changed'
-HEADS = CONTROL + '/signal-heads/'
+def enabled(snapshot):
+    return snapshot.json(CONTROL + '/config.json', {}).get('schema_version', 0) >= 10
+
+
+def require_enabled(snapshot):
+    if not enabled(snapshot):
+        raise TaskError('Enable signals after all writers have drained')
 
 
 def enable(store, operation_id):
     def apply(snapshot):
         config = snapshot.json(CONTROL + '/config.json')
-        if outbox.enabled(snapshot):
+        if enabled(snapshot):
             return {}, {'enabled': True}
         for location in layout.tasks(snapshot).values():
             if any(s.get('run_id') for s in snapshot.json(location + '/runtime.json')['slots'].values()):
@@ -24,9 +30,6 @@ def enable(store, operation_id):
         config = json.loads(changes.get(CONTROL + '/config.json', encode(config)))
         config['schema_version'] = 10
         changes[CONTROL + '/config.json'] = encode(config)
-        for task_id in layout.tasks(snapshot):
-            for signal_id, record in catalog(snapshot, task_id).items():
-                changes[HEADS + task_id + '/' + signal_id + '.json'] = encode(record)
         return changes, {'enabled': True}
     return store.transact(operation_id, {'kind':'signal-enable'}, apply)
 
@@ -51,47 +54,31 @@ def path(snapshot, task_id):
     return runtime.data_prefix(definition, task_id, runtime.root(task_id, snapshot)) + 'signals/'
 
 
-def catalog(snapshot, task_id, *, include_removed=False):
+def catalog(snapshot, task_id, *, include_ended=True):
     prefix = path(snapshot, task_id)
     result = {}
     for name in sorted(p for p in snapshot.entries if p.startswith(prefix) and p.endswith('.json')):
         value = validate(snapshot.json(name), task_id)
         if value['id'] in result:
             raise TaskError('Duplicate signal ID')
+        if not include_ended and value['status'] != 'active':
+            continue
         result[value['id']] = dict(value=value, path=name, sha256=hashlib.sha256(snapshot.read(name)).hexdigest())
-    if include_removed:
-        heads = HEADS + task_id + '/'
-        for name in sorted(p for p in snapshot.entries if p.startswith(heads) and p.endswith('.json')):
-            record = snapshot.json(name)
-            value = validate(record['value'], task_id)
-            if name != heads + value['id'] + '.json':
-                raise TaskError('Signal head identity mismatch')
-            current = result.get(value['id'])
-            if record.get('removed') and current is None:
-                if value['status'] == 'active':
-                    raise TaskError('Removed signal requires an ended version')
-                result[value['id']] = dict(record, evidence_path=name)
-            elif current and all(current[k] == record.get(k) for k in ('value', 'path', 'sha256')):
-                current['evidence_path'] = name
     return result
 
 
 def read_value(snapshot, name):
     """Read a signal's logical value from task data or its durable evidence path."""
-    record = snapshot.json(name)
-    value = record.get('value') if isinstance(record, dict) and name.startswith(HEADS) else record
+    value = snapshot.json(name)
     if not isinstance(value, dict):
         raise TaskError('Missing signal evidence')
-    validate(value, identity(value.get('task_id'), 'source task ID'))
-    if name.startswith(HEADS) and name != HEADS + value['task_id'] + '/' + value['id'] + '.json':
-        raise TaskError('Signal head identity mismatch')
-    return value
+    return validate(value, identity(value.get('task_id'), 'source task ID'))
 
 
 def put(store, task_id, run_id, value):
     value = validate(value, task_id)
     snapshot = store.snapshot()
-    outbox.require_enabled(snapshot)
+    require_enabled(snapshot)
     run = runtime.check(store, task_id, run_id)
     state = runtime.local_state(store, task_id, run_id)
     if not state.is_file():
@@ -101,9 +88,8 @@ def put(store, task_id, run_id, value):
     previous = catalog(snapshot, task_id).get(value['id'])
     if previous and previous['path'] != relative:
         relative = previous['path']
-    head = snapshot.json(HEADS + task_id + '/' + value['id'] + '.json')
-    old = previous['value'] if previous else (head or {}).get('value')
-    if old and (old != value or (head or {}).get('removed')) and value['revision'] <= old['revision']:
+    old = previous['value'] if previous else None
+    if old and old != value and value['revision'] <= old['revision']:
         raise TaskError('Changed signal requires a newer revision')
     if old is None and value['revision'] != 1:
         raise TaskError('A new signal starts at revision 1')
@@ -116,86 +102,101 @@ def put(store, task_id, run_id, value):
     return {'path': relative, 'publication': 'pending'}
 
 
-def subscribe(store, operation_id, task_id, consumer, signal_type=None):
+def subscribe(store, operation_id, task_id, consumer):
     def apply(snapshot):
-        outbox.require_enabled(snapshot)
+        require_enabled(snapshot)
         runtime.load_task(snapshot, task_id); runtime.load_task(snapshot, consumer)
         if task_id == consumer:
             raise TaskError('A task cannot subscribe to its own signals')
         config = snapshot.json(SUBSCRIPTIONS, {'schema_version':1, 'subscriptions':[]})
-        item = dict(task_id=task_id, consumer=consumer, type=signal_type)
+        item = dict(task_id=task_id, consumer=consumer)
         if item not in config['subscriptions']:
             config = copy.deepcopy(config)
             config['subscriptions'].append(item)
         return {SUBSCRIPTIONS: encode(config)}, item
     return store.transact(operation_id, dict(kind='signal-subscribe', task_id=task_id,
-                          consumer=consumer, type=signal_type), apply)
+                          consumer=consumer), apply)
 
 
 def publication(snapshot, run, source, touched, operation_id):
-    if not outbox.enabled(snapshot):
+    """Validate owned signal updates inside the publication transaction."""
+    if not enabled(snapshot):
         return {}
     task_id = run['task_id']
     prefix = runtime.data_prefix(run, task_id) + 'signals/'
     if not any(p.startswith(prefix) for p in touched):
         return {}
     before, after = catalog(snapshot, task_id), catalog(source, task_id)
-    subscriptions = snapshot.json(SUBSCRIPTIONS, {'subscriptions':[]})['subscriptions']
-    changes, values = {}, []
-    for signal_id in sorted(set(before) | set(after)):
+    for signal_id in set(before) | set(after):
         old, new = before.get(signal_id), after.get(signal_id)
-        if old == new:
+        if new is None:
+            raise TaskError('Retain ended signal records; physical deletion is unsupported')
+        value = new['value']
+        if old is None and value['revision'] != 1:
+            raise TaskError('A new signal starts at revision 1')
+        if old and (old['value'] != value or old['path'] != new['path']) and value['revision'] <= old['value']['revision']:
+            raise TaskError('Changed signal requires a newer revision')
+    return {}
+
+
+def message_id(task_id, signal_id, revision):
+    return 'signal-' + digest([task_id, signal_id, revision])[:64]
+
+
+def sync(store, *, task_id=None):
+    """Catch up to current main using inbox messages as the only delivery record."""
+    from . import task_io
+    snapshot = store.snapshot()
+    if not enabled(snapshot):
+        return dict(required=False, delivered=0, blocked=[], needs_attention=False)
+    subscriptions = snapshot.json(SUBSCRIPTIONS, {'subscriptions': []})['subscriptions']
+    inboxes, blocked = {}, []
+    delivered = selected = 0
+    for producer in sorted({s['task_id'] for s in subscriptions}):
+        if task_id is not None and producer != task_id:
             continue
-        head_path = HEADS + task_id + '/' + signal_id + '.json'
-        head = snapshot.json(head_path)
-        previous = old['value'] if old else (head or {}).get('value')
-        if new:
-            value = new['value']
-            if previous is None and value['revision'] != 1:
-                raise TaskError('A new signal starts at revision 1')
-            if previous and (value != previous or (head or {}).get('removed')) and value['revision'] <= previous['revision']:
-                raise TaskError('Changed signal requires a newer revision')
-            changes[head_path] = encode(new)
-        else:
-            if old['value']['status'] == 'active':
-                raise TaskError('Publish a resolved/withdrawn tombstone before removing an active signal')
-            value = old['value']
-            changes[head_path] = encode(dict(old, removed=True))
-        selected = new or old
-        payload = dict(schema_version=1, task_id=task_id, signal_id=signal_id,
-            revision=value['revision'], type=value['type'], status=value['status'],
-            removed=new is None, path=selected['path'], sha256=selected['sha256'])
-        message_id = 'signal-' + digest([task_id, operation_id, signal_id])[:64]
-        types = {None, value['type'], previous['type'] if previous else value['type']}
-        for target in sorted({s['consumer'] for s in subscriptions if s['task_id'] == task_id and
-                              s.get('type') in types}):
-            values.append(dict(task_id=target, message_id=message_id, kind=KIND, payload=payload))
-    if values:
-        changes.update(outbox.record(snapshot, task_id, operation_id, values, channel="signals"))
-    return changes
+        targets = sorted({s['consumer'] for s in subscriptions if s['task_id'] == producer})
+        for record in catalog(snapshot, producer).values():
+            value = record['value']
+            mid = message_id(producer, value['id'], value['revision'])
+            payload = dict(schema_version=1, task_id=producer, signal_id=value['id'], revision=value['revision'])
+            expected = dict(schema_version=1, id=mid, kind=KIND, payload=payload)
+            for target in targets:
+                selected += 1
+                if target not in inboxes:
+                    inboxes[target] = task_io.IOStore(store, target).optional()
+                previous = inboxes[target].json('messages/' + mid + '.json')
+                try:
+                    if previous:
+                        if previous != expected:
+                            raise task_io.MessageConflict('Signal message identity collision')
+                        continue
+                    task_io.send(store, mid, target, mid, KIND, payload)
+                    delivered += 1
+                except task_io.MessageConflict:
+                    blocked.append(dict(task_id=target, message_id=mid, reason='message_id_conflict'))
+    return dict(required=bool(selected), delivered=delivered, blocked=blocked, needs_attention=bool(blocked))
+
+
+def require_delivery(result):
+    if result['blocked']:
+        raise TaskError('Signal message ID has different content; inspect signal sync')
+    return result
 
 
 def read_notice(store, message):
-    from .store import Snapshot, git
+    """A notice is a hint: consumers evaluate current main, not historical events."""
     value = message.get('payload', {})
     if message.get('kind') != KIND or value.get('schema_version') != 1:
         raise TaskError('Invalid signal notification')
     task_id = identity(value.get('task_id'), 'source task ID')
     signal_id = identity(value.get('signal_id'), 'signal ID')
-    commit = value.get('publication_commit', '')
-    import re
-    current = store.snapshot()
-    if not re.fullmatch(r'[a-f0-9]{40}|[a-f0-9]{64}', commit) or not git(
-            store.repo, 'merge-base', '--is-ancestor', commit, current.commit, predicate=True):
-        raise TaskError('Signal notification is outside authority history')
-    original = Snapshot(store, commit)
-    if value.get('removed') is True:
-        record = original.json(HEADS + task_id + '/' + signal_id + '.json')
-        if not record or record.get('removed') is not True or signal_id in catalog(original, task_id):
-            raise TaskError('Missing signal removal evidence')
-    else:
-        record = catalog(original, task_id).get(signal_id)
-    if (not record or value.get('path') != record['path'] or value.get('sha256') != record['sha256'] or
-            any(value.get(k) != record['value'].get(k) for k in ('revision', 'type', 'status'))):
-        raise TaskError('Signal notification differs from its saved source')
-    return dict(value, commit=commit)
+    revision = value.get('revision')
+    if type(revision) is not int or revision < 1 or message.get('id') != message_id(task_id, signal_id, revision):
+        raise TaskError('Invalid signal notification identity')
+    snapshot = store.snapshot()
+    record = catalog(snapshot, task_id).get(signal_id)
+    if not record or record['value']['revision'] < revision:
+        raise TaskError('Signal notification is ahead of current main')
+    return dict(value, commit=snapshot.commit, path=record['path'], sha256=record['sha256'],
+                type=record['value']['type'], status=record['value']['status'])

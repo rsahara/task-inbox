@@ -19,7 +19,7 @@ if output.exists():
     parser.error("output already exists; choose another path")
 with tempfile.TemporaryDirectory(prefix="task-runtime-build-") as temp:
     staging = Path(temp)
-    names = ("__init__.py", "store.py", "runtime.py", "lifecycle.py", "cli.py", "transport.py", "leases.py", "maintenance.py", "completion.py", "task_io.py", "layout.py", "git_support.py", "reports.py", "signals.py", "outbox.py")
+    names = ("__init__.py", "store.py", "runtime.py", "lifecycle.py", "cli.py", "transport.py", "leases.py", "maintenance.py", "completion.py", "task_io.py", "layout.py", "git_support.py", "reports.py", "signals.py")
     if args.format == "source":
         selected = ["foundation/task_runtime/" + name for name in names] + [
             "LICENSE", "docs/task-runtime.md", "bin/task-inbox",
