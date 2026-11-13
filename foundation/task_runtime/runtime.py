@@ -291,7 +291,7 @@ def start(store, operation_id, task_id, runner_id, *, run_id=None, machine_id=No
         from . import completion
         request['completion_contract'] = completion.contract(completion_contract)
     from . import maintenance, signals
-    signals.require_delivery(signals.sync(store))
+    signals.startup_sync(store, task_id)
     maintenance.maintain(store, task_id)
     # A normal scheduled admission can reclaim eligible expired leases from
     # remote state alone. A replay only reads its historical receipt: it must

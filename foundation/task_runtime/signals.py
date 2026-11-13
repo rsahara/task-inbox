@@ -2,6 +2,7 @@
 import copy
 import hashlib
 import json
+import sys
 from pathlib import Path
 
 from . import layout, runtime
@@ -150,13 +151,15 @@ def message_id(task_id, signal_id, revision):
     return 'signal-' + digest([task_id, signal_id, revision])[:64]
 
 
-def sync(store, *, task_id=None):
+def sync(store, *, task_id=None, participant=None):
     """Catch up to current main using inbox messages as the only delivery record."""
     from . import task_io
     snapshot = store.snapshot()
     if not enabled(snapshot):
         return dict(required=False, delivered=0, blocked=[], needs_attention=False)
     subscriptions = snapshot.json(SUBSCRIPTIONS, {'subscriptions': []})['subscriptions']
+    if participant is not None:
+        subscriptions = [s for s in subscriptions if participant in (s['task_id'], s['consumer'])]
     inboxes, blocked = {}, []
     delivered = selected = 0
     for producer in sorted({s['task_id'] for s in subscriptions}):
@@ -183,6 +186,15 @@ def sync(store, *, task_id=None):
                 except task_io.MessageConflict:
                     blocked.append(dict(task_id=target, message_id=mid, reason='message_id_conflict'))
     return dict(required=bool(selected), delivered=delivered, blocked=blocked, needs_attention=bool(blocked))
+
+
+def startup_sync(store, task_id):
+    result = sync(store, participant=task_id)
+    if result['blocked']:
+        # An owned repair run may advance the signal revision. Keep admission
+        # available while reporting the immutable inbox collision explicitly.
+        print(json.dumps(dict(event='signal-sync-blocked', task_id=task_id, **result)), file=sys.stderr)
+    return result
 
 
 def require_delivery(result):

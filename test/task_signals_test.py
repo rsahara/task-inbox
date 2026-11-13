@@ -147,6 +147,32 @@ class SignalTest(RuntimeCase):
         self.assertEqual(len(task_io.pending(self.sb,'viewer')['messages']),1)
         self.assertTrue(signals.sync(self.sb)['needs_attention'])
 
+    def test_collision_allows_unrelated_admission_and_owned_revision_repair(self):
+        import contextlib
+        import io
+        self.add('unrelated')
+        self.prepared()
+        mid = signals.message_id('source', 'check', 1)
+        task_io.send(self.sa, 'collision', 'assessor', mid, 'manual', {})
+        signals.put(self.sa, 'source', 'run', value())
+        with self.assertRaisesRegex(TaskError, 'different content'):
+            runtime.publish(self.sa, 'finish-collision', 'source', 'run', outcome='succeeded')
+        with contextlib.redirect_stderr(io.StringIO()) as diagnostics:
+            self.start('unrelated-run', task='unrelated', store=self.sb)
+        self.assertNotIn('signal-sync-blocked', diagnostics.getvalue())
+        with contextlib.redirect_stderr(io.StringIO()) as diagnostics:
+            self.start('repair', task='source', store=self.sb)
+            result = task_io.wake(self.sb, 'consume-collision', 'assessor', 'consumer', 'consume')
+        self.assertEqual(result['action'], 'start')
+        self.assertIn('signal-sync-blocked', diagnostics.getvalue())
+        self.prepare('repair', task='source', store=self.sb)
+        signals.put(self.sb, 'source', 'repair', value(2))
+        runtime.publish(self.sb, 'save-repair', 'source', 'repair', outcome='succeeded')
+        self.assertFalse(signals.sync(self.sb)['blocked'])
+        self.assertEqual(task_io.message(self.sb, 'assessor', mid)[0]['kind'], 'manual')
+        latest = signals.message_id('source', 'check', 2)
+        self.assertEqual(task_io.message(self.sb, 'assessor', latest)[0]['payload']['revision'], 2)
+
     def test_ordinary_output_does_not_notify(self):
         work=self.prepared()
         self.output(work,'tasks/source/data/report.json',encode({'answer':42}))

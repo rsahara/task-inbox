@@ -43,9 +43,12 @@ There is no delivery ledger, outbox, publication intent, or per-subscriber curso
 Completed inbox messages still suppress duplicate delivery; retain inbox messages
 under the existing inbox retention contract. Conflicting IDs are reported while
 other destinations continue. Transport failure may stop a pass; retry from any
-clone. Runtime publication/finish sync the producer and run admission syncs all
+clone. Runtime publication/finish sync the producer and run admission syncs the starting task's incoming/outgoing
 routes, recovering a crash after saving data or a partial fanout. Explicit sync
-returns `needs_attention` for collisions; automatic callers fail visibly.
+returns `needs_attention` for collisions; publication callers fail visibly. Admission reports collisions as structured
+`signal-sync-blocked` diagnostics on stderr and still permits owned repair runs;
+unrelated routes do not prevent startup. A producer may publish a higher revision
+to recover without changing the existing inbox message.
 
 The guarantee is convergence to the latest state on a successful subsequent
 sync, not delivery of every intermediate revision. A later revision may replace
