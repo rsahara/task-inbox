@@ -310,6 +310,8 @@ def wake(store, operation_id, task_id, runner_id, run_id=None, *, force=False):
     task, active = runtime.load_task(store.snapshot(), task_id)
     if task['execution']['max_runners'] != 1:
         raise TaskError('Inbox consumers require max_runners=1; run streams support parallel producers')
+    from . import signals
+    signals.require_delivery(signals.sync(store))
     if not force and not pending(store, task_id)['messages']:
         return dict(action='idle', task_id=task_id)
     if task['status'] != 'open':

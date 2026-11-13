@@ -79,6 +79,18 @@ class SignalTest(RuntimeCase):
         self.start('consumer',task='viewer',store=self.sb)
         self.assertEqual(len(task_io.pending(self.sb,'viewer')['messages']),1)
 
+    def test_wake_recovers_saved_signal_before_empty_inbox_check(self):
+        self.prepared()
+        with patch.object(task_io, 'send', side_effect=TaskError('offline')):
+            with self.assertRaises(TaskError):
+                self.publish()
+        self.assertFalse(task_io.pending(self.sb, 'viewer')['messages'])
+        result = task_io.wake(self.sb, 'wake-viewer', 'viewer', 'worker', 'consumer')
+        self.assertEqual(result['action'], 'start')
+        self.assertEqual(len(task_io.pending(self.sb, 'viewer')['messages']), 1)
+        self.assertEqual(task_io.wake(self.sb, 'wake-viewer', 'viewer', 'worker', 'consumer')['run']['run_id'], 'consumer')
+        self.assertEqual(len(task_io.pending(self.sb, 'viewer')['messages']), 1)
+
     def test_list_before_subscription_and_late_subscription(self):
         self.add('late')
         self.prepared(); self.publish()
