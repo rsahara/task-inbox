@@ -17,7 +17,7 @@ def settings(config):
         if config.get('schema_version') == 5:
             raise TaskError('Indexed layout is missing')
         return None
-    if config.get('schema_version') not in (5, 6, 7, 8, 9) or not isinstance(value, dict) or set(value) != {'index', 'task_root'}:
+    if config.get('schema_version') not in (5, 6, 7, 8, 9, 10) or not isinstance(value, dict) or set(value) != {'index', 'task_root'}:
         raise TaskError('Unsupported task layout')
     index, root = path(value['index']), path(value['task_root'])
     if index == root or root.startswith(index + '/'):

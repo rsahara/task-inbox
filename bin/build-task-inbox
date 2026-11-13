@@ -19,7 +19,7 @@ if output.exists():
     parser.error("output already exists; choose another path")
 with tempfile.TemporaryDirectory(prefix="task-runtime-build-") as temp:
     staging = Path(temp)
-    names = ("__init__.py", "store.py", "runtime.py", "lifecycle.py", "cli.py", "transport.py", "leases.py", "maintenance.py", "completion.py", "task_io.py", "layout.py", "git_support.py", "reports.py")
+    names = ("__init__.py", "store.py", "runtime.py", "lifecycle.py", "cli.py", "transport.py", "leases.py", "maintenance.py", "completion.py", "task_io.py", "layout.py", "git_support.py", "reports.py", "signals.py")
     if args.format == "source":
         selected = ["foundation/task_runtime/" + name for name in names] + [
             "LICENSE", "docs/task-runtime.md", "bin/task-inbox",
@@ -29,7 +29,7 @@ with tempfile.TemporaryDirectory(prefix="task-runtime-build-") as temp:
             "docs/task-runtime-timeouts.md", "test/task_timeout_test.py", "test/fixtures/task_timeout_adapter.py",
             "docs/task-runtime-cleanup.md", "test/task_cleanup_test.py", "test/task_metadata_retirement_test.py",
             "docs/task-runtime-completion.md", "test/task_completion_test.py",
-            "docs/task-io.md", "test/task_io_test.py",
+            "docs/task-io.md", "test/task_io_test.py", "docs/task-signals.md", "test/task_signals_test.py",
             "docs/task-runtime-scenarios.md", "test/task_scenarios_test.py",
             "test/fixtures/task_scenario_worker.py",
             "test/fixtures/task_legacy_prepare.py",

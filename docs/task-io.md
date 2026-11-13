@@ -78,3 +78,10 @@ When external publication overwrites a live URL, a Git generation check alone ca
 python3 -m unittest discover -s test -p task_io_test.py
 python3 -m unittest discover -s test -p task_runtime_test.py
 ```
+
+## Signal delivery
+
+[Task signals](task-signals.md) add task-owned typed records. `signal sync`
+compares current main with existing inbox messages to recover missing deliveries
+from any clone. It neither launches consumers nor acknowledges their messages.
+Ordinary application outputs are read directly from main.

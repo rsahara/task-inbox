@@ -5,7 +5,7 @@ from pathlib import Path
 import sys
 import uuid
 
-from . import VERSION, completion, leases, lifecycle, reports, runtime, task_io
+from . import VERSION, completion, leases, lifecycle, reports, runtime, task_io, signals
 from .store import GitFailure, Store, TaskError, encode, identity
 
 
@@ -22,6 +22,20 @@ def parser():
     init.add_argument("--index", help="Repository-relative JSON index file")
     init.add_argument("--task-root", help="Default directory for new tasks")
     commands.add_parser("transport-check", help="Read-only transport capability and ref/object diagnostics")
+    signal = commands.add_parser('signal').add_subparsers(dest='action', required=True)
+    signal.add_parser('enable', help='Enable schema 10 after all writers drain')
+    sync = signal.add_parser('sync', help='Catch up subscribers to current signals')
+    sync.add_argument('--task')
+    for name in ('list', 'put', 'subscribe'):
+        item = signal.add_parser(name)
+        item.add_argument('--task', required=True)
+        if name == 'put':
+            item.add_argument('--run-id', required=True)
+            item.add_argument('--file', required=True)
+        if name == 'subscribe':
+            item.add_argument('--consumer', required=True)
+        if name == 'list':
+            item.add_argument('--include-ended', action='store_true')
     io = commands.add_parser('io').add_subparsers(dest='action', required=True)
     for name in ('send', 'pending', 'status', 'complete', 'wake', 'emit'):
         item = io.add_parser(name)
@@ -135,11 +149,21 @@ def dispatch(args):
     operation = identity(args.operation_id or uuid.uuid4().hex, "operation ID")
     # Always expose a generated request identity before a remote mutation, so
     # an interrupted CLI can be retried without guessing another request ID.
-    mutation = args.command == "init" or args.action in ("add", "edit", "start", "publish", "finish", "recover", "cleanup", "activate", "recovery-policy", "renew", "checkpoint", "deliver-checkpoint", "heartbeat", "completion", 'send', 'complete', 'wake', 'emit')
+    mutation = args.command == "init" or args.action in ("add", "edit", "start", "publish", "finish", "recover", "cleanup", "activate", "recovery-policy", "renew", "checkpoint", "deliver-checkpoint", "heartbeat", "completion", 'send', 'complete', 'wake', 'emit', 'enable', 'subscribe', 'put', 'sync')
     if mutation:
         print(json.dumps({"operation_id": operation}), file=sys.stderr, flush=True)
     if args.command == "init":
         return runtime.initialize(store, operation, index=args.index, task_root=args.task_root)
+    if args.command == 'signal':
+        if args.action == 'enable':
+            return signals.enable(store, operation)
+        if args.action == 'list':
+            return {'signals': signals.catalog(store.snapshot(), args.task, include_ended=args.include_ended)}
+        if args.action == 'put':
+            return signals.put(store, args.task, args.run_id, json.loads(Path(args.file).read_text()))
+        if args.action == 'sync':
+            return signals.sync(store, task_id=args.task)
+        return signals.subscribe(store, operation, args.task, args.consumer)
     if args.command == 'io':
         if args.action == 'send':
             return task_io.send(store, operation, args.task, args.message_id, args.kind,
