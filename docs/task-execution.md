@@ -8,6 +8,9 @@ detect a hosting service, dispatch Actions, or change schedules.
 
 ## Responsibilities
 
+The README's [responsibility and storage map](../README.md#responsibility-and-storage-map)
+shows the caller/session boundary alongside shared Git branches and task data.
+
 | Owner | Responsibilities |
 | --- | --- |
 | Task | Declare handled inbox kinds, read/written signal types, required business capabilities and readiness; process inputs; save owned outputs and signals; verify results before acknowledging captured requests. |

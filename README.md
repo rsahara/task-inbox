@@ -19,6 +19,8 @@ Task instructions do not detect Codex Cloud, a local machine, GitHub Actions,
 or a hosted service. Required capabilities and domain targets belong to the
 task; credentials, tools, placement and worker startup belong to the caller.
 
+### Execution flow
+
 ```mermaid
 flowchart LR
     H["Manual / schedule / event"] --> E["task-inbox execute"]
@@ -44,6 +46,81 @@ separate from delivery of a host-specific startup hint.
 
 See the [execution and task interface contract](docs/task-execution.md) for
 declarations, adapters, continuation, recovery and migration.
+
+### Responsibility and storage map
+
+The nesting below describes logical responsibilities and data placement in a
+Codex deployment; other executors use the same Git storage contract.
+The execution host supplies Codex sessions, prompts, tools and private working
+state. Shared Git data outlives those sessions. An installed adapter may run a
+worker in another process or session; the boxes do not require a single process.
+The session prompt supplies caller bootstrap instructions; `task.md` is the
+persistent business prompt supplied to the worker with its admitted context.
+
+```mermaid
+flowchart TB
+    subgraph HOST["Codex Cloud / local / GitHub Actions runner — caller-owned"]
+        direction TB
+        subgraph SESSION["Codex session / executor context"]
+            direction TB
+            PROMPT["Codex session prompt<br/>Caller bootstrap and execution policy"]
+            subgraph TOOL["task-inbox — common coordination"]
+                RUNTIME["Readiness, ownership,<br/>signal sync and run I/O"]
+            end
+            WORKER["Task execution — task-owned<br/>Worker prompt and business tools<br/>Pinned definition + admitted context"]
+        end
+        PRIVATE["Private executor state<br/>Workspace, logs and execution marker<br/>May disappear with the host"]
+    end
+    subgraph GIT["Shared task-data Git repository"]
+        direction TB
+        subgraph MAIN["Authority branch: main"]
+            direction TB
+            subgraph TASKDIR["Task directory: tasks/TASK/"]
+                DEFINITION["Task definition — application-owned<br/>task.json, task.md, scripts/runbooks"]
+                subgraph DATA["Permanent task data: data/ — task-owned"]
+                    OUTPUT["Outputs, ledgers and evidence"]
+                    SIGNAL["Signals (output)<br/>signals/SIGNAL.json"]
+                    OUTPUT ~~~ SIGNAL
+                end
+                RECORDS["Runtime-managed authority records<br/>runtime.json<br/>io/receipts/MESSAGE.json"]
+            end
+        end
+        INBOX["Inbox branch<br/>task-io/TASK/inbox<br/>messages/MESSAGE.json"]
+        RUNIO["Run I/O branch<br/>task-io/TASK/runs/RUN<br/>state.json: heartbeat<br/>events/* and results/*"]
+    end
+    %% Invisible links arrange boxes without implying execution order.
+    PROMPT ~~~ RUNTIME
+    RUNTIME ~~~ WORKER
+    WORKER ~~~ PRIVATE
+    DEFINITION ~~~ OUTPUT
+    SIGNAL ~~~ RECORDS
+    RECORDS ~~~ INBOX
+    INBOX ~~~ RUNIO
+```
+
+`TASK`, `RUN`, `MESSAGE` and `SIGNAL` are placeholders. Paths and branch names
+show the default layout; task directories, `data_path`, the authority branch and
+I/O namespace can be configured. Task definitions and signals are files on main,
+while inbox and live run I/O use separate branches in the same repository.
+
+| Responsibility | Authoritative data location in the default layout |
+| --- | --- |
+| Caller: host, model, credentials, prompts and startup/continuation policy | Caller integration and installed executor profile; the session prompt references canonical instructions |
+| Task: definition and business behavior | `main:tasks/TASK/task.json`, `task.md`, and linked scripts/runbooks |
+| Task: permanent outputs and current output signals | `main:tasks/TASK/data/*`, including `data/signals/SIGNAL.json` |
+| Runtime: inbox protocol, with requests submitted by producers | Branch `task-io/TASK/inbox`, under `messages/` |
+| Runtime: per-run I/O and heartbeat | Branch `task-io/TASK/runs/RUN`, containing `state.json`, `events/`, `results/` |
+| Runtime: ownership and accepted receipts | `main:tasks/TASK/runtime.json` and `io/receipts/MESSAGE.json` |
+| Caller routing and runtime coordination metadata | `main:.task-system/`, including signal subscriptions and operation receipts |
+
+Main remains the authority for ownership and accepted results. A heartbeat on a
+run branch does not grant a slot. Work checkpoints use another runtime branch,
+`task-runtime/TASK/RUN/work`; they do not replace accepted task data on main.
+After finish, verified run I/O can be collected, with completed execution
+metadata read from main history. See [storage and retention](docs/task-io.md#storage-and-ownership)
+and [cleanup](docs/task-runtime-cleanup.md). Prompts use the
+[caller/worker roles](docs/task-execution.md#codex-cloud-and-local-prompts);
+business instructions remain independent of the chosen host and output consumers.
 
 ## Intended use cases
 

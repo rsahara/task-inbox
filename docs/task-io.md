@@ -9,6 +9,9 @@ signal types without depending on its subscribers or execution host.
 
 ## Storage and ownership
 
+See the [responsibility and storage map](../README.md#responsibility-and-storage-map)
+for how these shared refs relate to Codex sessions, task definitions and signals.
+
 | Ref | Contents |
 | --- | --- |
 | `main` | Task definitions, slots/generations and accepted results at `tasks/<id>/io/receipts/<message-id>.json`; completed execution metadata is retained only in ordinary Git history |
