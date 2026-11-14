@@ -5,8 +5,45 @@ services, or LLM-powered agents process pending requests in a loop and
 acknowledge results. task-inbox coordinates concurrency, progress, and recovery
 across processes or machines.
 
-Use it with your existing workers and scheduler. task-inbox coordinates shared
-state; your executor starts workers and performs the task's work.
+Use it with your existing workers and scheduler. `task-inbox execute` checks
+conditions, admits and supervises a worker, and optionally continues to another
+eligible task. An installed executor adapter supplies the agent or script.
+
+## Task and caller design
+
+A task declares the inbox kinds it handles, the signal types it reads and
+publishes, and its readiness rule. It owns its business outputs and completion
+evidence. It can send an explicit request to another inbox or publish its own
+signals, without knowing which tasks consume its outputs or how they use them.
+Task instructions do not detect Codex Cloud, a local machine, GitHub Actions,
+or a hosted service. Required capabilities and domain targets belong to the
+task; credentials, tools, placement and worker startup belong to the caller.
+
+```mermaid
+flowchart LR
+    H["Manual / schedule / event"] --> E["task-inbox execute"]
+    E --> R{"Declared inputs ready?<br/>Task open? Slot available?"}
+    R -->|yes| X["Installed executor adapter"]
+    X --> T["Selected task<br/>Own inputs, work, outputs"]
+    T -->|publish own state| S[("Signals and outputs in Git")]
+    S -->|subscription sync| I[("Subscriber inbox")]
+    T -->|explicit request| I
+    T -->|verified completion| E
+    E --> C{"--continue permitted<br/>and within limit?"}
+    C -->|yes: recheck allowed tasks| R
+    C -->|no| N["Return pending work to caller"]
+    I --> R
+    N --> H
+```
+
+Subscriptions and execution allowlists are caller configuration. Producers do
+not name subscribers in their signal declarations. A same-invocation chain and a
+later scheduled or triggered run use the same readiness checks; each task gets
+its own run ID, ownership, workspace and heartbeat. Notification persistence is
+separate from delivery of a host-specific startup hint.
+
+See the [execution and task interface contract](docs/task-execution.md) for
+declarations, adapters, continuation, recovery and migration.
 
 ## Intended use cases
 
@@ -82,11 +119,32 @@ retries. A run with a business completion contract can supply terminal evidence
 with `run finish --completion-file`; use `run completion` to persist unknown
 outcomes before reconciliation. See [progress and results](docs/task-io.md#progress-external-operations-and-results).
 
+### One execution entrypoint
+
+Register or edit tasks with `--interface-file` to declare their handled inbox
+kinds, signal types and readiness. Then use the same entrypoint from any host:
+
+```sh
+python3 bin/task-inbox --repo /path/to/task-data execute --task example --check
+python3 bin/task-inbox --repo /path/to/task-data --operation-id invocation-1 \
+  execute --task example --runner worker-1 --executor /opt/workers/task-executor
+python3 bin/task-inbox --repo /path/to/task-data --operation-id invocation-2 \
+  execute --task example --task report --runner worker-1 \
+  --executor /opt/workers/task-executor --continue --max-tasks 4
+```
+
+The default executes at most one eligible task. Continuation only selects from
+the caller's ordered `--task` allowlist. `--check` never admits or launches a run.
+Tasks without a declaration remain manual; `--force` explicitly requests the
+first task once. Existing `io wake` and `run` commands remain available for
+integrations managing individual lifecycle steps.
+
 ### Process inbox requests in a loop
 
 Use the inbox to accept requests now and process them when a worker next runs.
-For example, an LLM agent can handle incoming requests according to the task's
-Markdown instructions:
+`execute` manages the caller lifecycle. Integrations managing lifecycle primitives
+themselves can use this equivalent loop; an LLM agent handles requests according
+to the task's Markdown instructions:
 
 1. Producers submit requests with `io send`. Requests remain pending until a
    worker acknowledges a result with `io complete`.
@@ -135,6 +193,7 @@ all deployed readers/writers are updated and existing runs have drained.
 | Topic | Guide |
 | --- | --- |
 | Task setup, execution, and configuration | [Runtime guide](docs/task-runtime.md) |
+| Task boundaries, interfaces and the execution entrypoint | [Execution guide](docs/task-execution.md) |
 | Messages and worker integration | [Task I/O](docs/task-io.md) |
 | Git transports and deployment checks | [Adapters](docs/task-runtime-adapters.md), [deployment](docs/task-runtime-deployment.md) |
 | Recovery resources and cleanup | [Reports](docs/task-runtime-reports.md), [cleanup](docs/task-runtime-cleanup.md) |

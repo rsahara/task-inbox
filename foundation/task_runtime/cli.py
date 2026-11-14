@@ -5,7 +5,7 @@ from pathlib import Path
 import sys
 import uuid
 
-from . import VERSION, completion, leases, lifecycle, reports, runtime, task_io, signals
+from . import VERSION, completion, execution, leases, lifecycle, reports, runtime, task_io, signals
 from .store import GitFailure, Store, TaskError, encode, identity
 
 
@@ -22,6 +22,16 @@ def parser():
     init.add_argument("--index", help="Repository-relative JSON index file")
     init.add_argument("--task-root", help="Default directory for new tasks")
     commands.add_parser("transport-check", help="Read-only transport capability and ref/object diagnostics")
+    execute = commands.add_parser('execute', help='Check readiness, run a task, and optionally continue')
+    execute.add_argument('--task', action='append', required=True, help='Allowed task ID; repeat in selection order')
+    execute.add_argument('--check', action='store_true', help='Read-only readiness plan; never admit or launch')
+    execute.add_argument('--runner', help='Caller identity, required unless --check')
+    execute.add_argument('--executor', help='Absolute path of a trusted installed worker adapter')
+    execute.add_argument('--condition-adapter', help='Absolute path of a trusted read-only readiness adapter')
+    execute.add_argument('--completion-contracts-file', help='JSON map of allowed task IDs to business completion contracts')
+    execute.add_argument('--continue', dest='continue_tasks', action='store_true', help='Allow another eligible task after success')
+    execute.add_argument('--max-tasks', type=int, help='Bound all admissions, including a task with late inbox arrivals (default: 16 with --continue, otherwise 1)')
+    execute.add_argument('--force', action='store_true', help='Explicitly run the first task once, including maintenance with no inbox work')
     signal = commands.add_parser('signal').add_subparsers(dest='action', required=True)
     signal.add_parser('enable', help='Enable schema 10 after all writers drain')
     sync = signal.add_parser('sync', help='Catch up subscribers to current signals')
@@ -59,6 +69,7 @@ def parser():
     add.add_argument("--id")
     add.add_argument("--title", required=True)
     add.add_argument("--body-file")
+    add.add_argument('--interface-file', help='Portable inbox, signal and readiness declaration')
     add.add_argument("--path", help="Explicit task directory; independent of archive state")
     add.add_argument("--data-path", help="Owned output directory")
     add.add_argument("--priority", type=int, default=3)
@@ -81,6 +92,7 @@ def parser():
     edit.add_argument("--expected-revision", required=True, type=int)
     edit.add_argument("--title")
     edit.add_argument("--body-file")
+    edit.add_argument('--interface-file', help='Replace the portable task interface at this revision')
     edit.add_argument("--priority", type=int)
     edit.add_argument("--max-runners", type=int)
     edit.add_argument("--status", choices=("open", "paused", "completed", "cancelled", "deleted"))
@@ -147,6 +159,14 @@ def dispatch(args):
     if args.command == "transport-check":
         return store.preflight()
     operation = identity(args.operation_id or uuid.uuid4().hex, "operation ID")
+    if args.command == 'execute':
+        if args.check:
+            return execution.plan(store, args.task, condition_adapter=args.condition_adapter, force=args.force)
+        print(json.dumps({'operation_id': operation}), file=sys.stderr, flush=True)
+        return execution.execute(store, operation, args.task, args.runner, args.executor,
+                                 condition_adapter=args.condition_adapter, continue_tasks=args.continue_tasks,
+                                 max_tasks=args.max_tasks, force=args.force,
+                                 completion_contracts=json.loads(Path(args.completion_contracts_file).read_text()) if args.completion_contracts_file else None)
     # Always expose a generated request identity before a remote mutation, so
     # an interrupted CLI can be retried without guessing another request ID.
     mutation = args.command == "init" or args.action in ("add", "edit", "start", "publish", "finish", "recover", "cleanup", "activate", "recovery-policy", "renew", "checkpoint", "deliver-checkpoint", "heartbeat", "completion", 'send', 'complete', 'wake', 'emit', 'enable', 'subscribe', 'put', 'sync')
@@ -194,10 +214,12 @@ def dispatch(args):
         if args.action == "add":
             return runtime.add_task(store, operation, title=args.title, task_id=args.id, body=body or "",
                 max_runners=args.max_runners, recovery_mode=args.recovery_mode,
-                heartbeat_seconds=args.heartbeat_seconds, stale_seconds=args.stale_seconds, priority=args.priority, path=args.path, data_path=args.data_path)
+                heartbeat_seconds=args.heartbeat_seconds, stale_seconds=args.stale_seconds, priority=args.priority, path=args.path, data_path=args.data_path,
+                interface=json.loads(Path(args.interface_file).read_text()) if args.interface_file else None)
         return runtime.edit_task(store, operation, args.id, args.expected_revision, title=args.title,
                                  body=body, status=args.status, archived=args.archived,
-                                 max_runners=args.max_runners, priority=args.priority)
+                                 max_runners=args.max_runners, priority=args.priority,
+                                 interface=json.loads(Path(args.interface_file).read_text()) if args.interface_file else None)
     task_id, run_id = args.task, args.run_id
     if args.action == "report":
         return reports.inventory(store, task_id, run_id)

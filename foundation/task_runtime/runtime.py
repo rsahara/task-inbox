@@ -174,7 +174,8 @@ def initialize(store, operation_id, *, index=None, task_root=None):
 
 
 def add_task(store, operation_id, *, title, task_id=None, body="", max_runners=1,
-             recovery_mode="manual", heartbeat_seconds=60, stale_seconds=300, priority=3, path=None, data_path=None):
+             recovery_mode="manual", heartbeat_seconds=60, stale_seconds=300, priority=3, path=None, data_path=None,
+             interface=None):
     task_id = identity(task_id or operation_id, "task ID")
     positive(max_runners, "max_runners", 1024)
     positive(heartbeat_seconds, "heartbeat interval")
@@ -189,6 +190,10 @@ def add_task(store, operation_id, *, title, task_id=None, body="", max_runners=1
                    stale_seconds=stale_seconds, priority=priority)
     if path is not None or data_path is not None:
         request.update(path=path, data_path=data_path)
+    if interface is not None:
+        from . import interfaces
+        interface = interfaces.validate(interface)
+        request['interface'] = interface
     requested_path = path
     def apply(snapshot):
         from . import layout
@@ -203,6 +208,8 @@ def add_task(store, operation_id, *, title, task_id=None, body="", max_runners=1
             task['task_path'] = path
         if data_path is not None:
             task['data_path'] = data_path
+        if interface is not None:
+            task['interface'] = interface
         layout.check_data(snapshot, task_id, path, data_prefix(task, task_id, path).rstrip('/'))
         runtime = {"schema_version": 2, "slots": {}}
         if snapshot.json(CONTROL + '/config.json')['schema_version'] < 9:
@@ -225,10 +232,14 @@ def list_tasks(store, include_archived=False):
 
 
 def edit_task(store, operation_id, task_id, expected_revision, *, title=None, body=None,
-              status=None, archived=None, max_runners=None, priority=None):
+              status=None, archived=None, max_runners=None, priority=None, interface=None):
     request = dict(kind="task-edit", task_id=task_id, expected_revision=expected_revision,
                    title=title, body=body, status=status, archived=archived,
                    max_runners=max_runners, priority=priority)
+    if interface is not None:
+        from . import interfaces
+        interface = interfaces.validate(interface)
+        request['interface'] = interface
     def apply(snapshot):
         task, runtime = load_task(snapshot, task_id)
         if task["revision"] != expected_revision:
@@ -248,6 +259,8 @@ def edit_task(store, operation_id, task_id, expected_revision, *, title=None, bo
             if not title.strip():
                 raise TaskError("Task title is required")
             task["title"] = title
+        if interface is not None:
+            task['interface'] = interface
         if priority is not None:
             task["priority"] = positive(priority, "priority")
         if max_runners is not None:
@@ -269,7 +282,8 @@ def edit_task(store, operation_id, task_id, expected_revision, *, title=None, bo
 
 
 def start(store, operation_id, task_id, runner_id, *, run_id=None, machine_id=None, item_key=None,
-          resume_from=None, checkpoint_id=None, completion_contract=None):
+          resume_from=None, checkpoint_id=None, completion_contract=None,
+          admission_check=None, admission_key=None):
     from . import leases
     run_id = identity(run_id or operation_id, "run ID")
     identity(runner_id, "runner ID")
@@ -281,6 +295,8 @@ def start(store, operation_id, task_id, runner_id, *, run_id=None, machine_id=No
         raise TaskError("Invalid item key")
     request = dict(kind="run-start", task_id=task_id, run_id=run_id, runner_id=runner_id,
                    machine_id=requested_machine_id, item_key=item_key)
+    if admission_check is not None:
+        request['admission_key'] = identity(admission_key, 'admission key')
     if resume_from is not None or checkpoint_id is not None:
         if not resume_from or not checkpoint_id:
             raise TaskError("Continuation requires the original run and checkpoint IDs")
@@ -305,6 +321,8 @@ def start(store, operation_id, task_id, runner_id, *, run_id=None, machine_id=No
         lifecycle.reap(store, task_id, apply=True, observer_profile="stateless")
     def apply(snapshot):
         task, runtime = load_task(snapshot, task_id)
+        if admission_check is not None:
+            admission_check(snapshot)
         config = snapshot.json(CONTROL + "/config.json")
         from . import task_io
         if config.get("migration", {}).get("state") == "staged":

@@ -1,5 +1,10 @@
 # Task I/O
 
+For one caller entrypoint covering readiness, admission, supervision and optional
+continuation, use [`execute`](task-execution.md). The primitives below remain
+available for existing integrations. A task declares handled inbox kinds and
+signal types without depending on its subscribers or execution host.
+
 `bin/task-inbox io` provides shared inter-task communication using only Git and Python. It requires no persistent runner, Actions workflow, or new schedule. Producers can send messages while the consumer is stopped or paused. The existing permanent feedback intake through `issue-inbox/` remains separate from this feature.
 
 ## Storage and ownership

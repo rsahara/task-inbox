@@ -5,6 +5,16 @@ documentation, CLI messages, commit messages, issues, and pull requests.
 Preserve original text when quoting sources or testing multilingual input.
 Conversation may use the user's preferred language.
 
+# Task and caller boundaries
+
+Follow [docs/task-execution.md](docs/task-execution.md). Tasks declare handled
+inbox kinds and read/written signal types, and own their business outputs without
+depending on subscribers or execution hosts. Keep readiness mechanics and bounded
+continuation in the common entrypoint; keep application-specific eligibility in
+trusted adapters. Host provisioning, models, credentials, triggers and schedules
+belong to caller integrations. Never launch a subscriber from a task's signal
+publication or business completion hook.
+
 # Repository content boundaries
 
 Keep this repository focused on the reusable task-inbox tool. Do not include
