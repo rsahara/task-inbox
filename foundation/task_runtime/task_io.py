@@ -151,8 +151,8 @@ def receipt_path(task_id, message_id, snapshot=None):
     return runtime.root(task_id, snapshot) + '/io/receipts/' + identity(message_id) + '.json'
 
 
-def pending(store, task_id):
-    authority = store.snapshot()
+def pending(store, task_id, *, authority=None):
+    authority = authority or store.snapshot()
     runtime.load_task(authority, task_id)
     stream = IOStore(store, task_id)
     snapshot = stream.optional()

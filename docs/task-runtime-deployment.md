@@ -5,6 +5,11 @@ same portable runtime in personal Cloud, local company workspaces and company
 agent Clouds; install transport/clock/stop adapters through each environment's
 existing authenticated integration. Do not copy personal credentials or data.
 
+See [Codex caller/worker prompts](task-execution.md#codex-cloud-and-local-prompts)
+and the [GitHub Actions example](task-execution.md#github-actions-caller) for host
+bootstrap, the current-session compatibility boundary, rerun identity and startup
+hints. These caller integrations do not change the task's business instructions.
+
 Before admission run `taskctl transport-check`. Its write capabilities are
 declarations, not proof of provider CAS or permissions. Validate exact candidate
 object transfer, expected-old updates, create-if-absent, conditional deletion and

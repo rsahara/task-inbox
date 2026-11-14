@@ -1,5 +1,10 @@
 # Portable Git task runtime v2
 
+Version 2.13 adds [portable task interfaces and `execute`](task-execution.md),
+one caller entrypoint for checking conditions, supervised execution and explicitly
+bounded continuation. Task business logic remains independent of its execution
+host and output consumers. Individual `run`/`io wake` commands remain supported.
+
 Version 2.10 unifies every heartbeat, event, and result in [task I/O](task-io.md).
 The old heartbeat writer and per-task enable command are removed.
 

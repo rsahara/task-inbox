@@ -1,5 +1,10 @@
 # Task-owned signals
 
+Tasks declare read and written types in their [portable interface](task-execution.md#declaration).
+Declarations do not identify output consumers or choose a startup host. Caller
+subscriptions route changes; `execute` checks readiness and optionally continues
+within its explicit allowlist. Signal sync itself never starts a consumer.
+
 Signals are persistent task data, not a generic notification channel. Ordinary
 outputs remain in each task's data area and readers inspect them on main.
 A task explicitly publishes signals at `<data_path>/signals/*.json`. Each record
