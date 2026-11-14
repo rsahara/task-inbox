@@ -4,7 +4,7 @@ import unittest
 from unittest.mock import patch
 
 import task_runtime_test as fixtures
-from task_runtime import runtime, task_io
+from task_runtime import maintenance, runtime, task_io
 from task_runtime.store import GitFailure, Store, TaskError, encode
 
 
@@ -482,6 +482,57 @@ class TaskIOTest(fixtures.RuntimeCase):
         stream.push(stream.ref, candidate, None)
         with self.assertRaisesRegex(TaskError, 'without a task I/O manifest'):
             stream.ensure()
+
+    def test_saved_stream_requires_a_complete_matching_finish_manifest(self):
+        self.setup_io()
+        run = self.start()
+        self.prepare()
+        task_io.emit(self.sa, 'event', 't', 'r', 'progress', 'progress', {'step': 1})
+        with patch('task_runtime.maintenance.maintain'):
+            runtime.publish(self.sa, 'finish', 't', 'r', outcome='succeeded')
+        cleanup_path = 'tasks/t/runs/r/cleanup.json'
+        cleanup = self.sa.snapshot().json(cleanup_path)
+        stream = task_io.IOStore(self.sb, 't', run)
+        saved = stream.optional()
+        self.assertEqual(saved.json('events/progress.json')['payload'], {'step': 1})
+        self.assertTrue(cleanup['heartbeat_head'])
+        self.assertTrue(cleanup['io_manifest'])
+        incomplete = dict(cleanup['io_manifest'])
+        del incomplete['events/progress.json']
+        for manifest, error in [([], 'lack the stream manifest'), ({}, 'lack the stream manifest'),
+                                (incomplete, 'differ from the finish manifest')]:
+            with self.subTest(manifest_type=type(manifest).__name__, error=error):
+                self.commit_changes(self.sa, {cleanup_path: encode(dict(cleanup, io_manifest=manifest))})
+                before = self.sa.fetch()
+                with self.assertRaisesRegex(TaskError, error):
+                    stream.optional()
+                refs = {ref: self.sb.remote_tip(ref) for ref in (run['work_ref'], run['io_ref'])}
+                with self.assertRaisesRegex(TaskError, error):
+                    maintenance.collect(self.sb, 't', 'r', apply=True)
+                self.assertEqual({ref: self.sb.remote_tip(ref) for ref in refs}, refs)
+                self.assertEqual(self.sa.fetch(), before)
+                self.assertEqual(runtime.load_run(self.sb.snapshot(), 't', 'r')[2]['status'], 'succeeded')
+        self.commit_changes(self.sa, {cleanup_path: encode(cleanup)})
+        self.assertEqual(stream.optional().entries, saved.entries)
+
+    def test_saved_stream_detects_changed_record_bytes(self):
+        self.setup_io()
+        run = self.start()
+        self.prepare()
+        task_io.emit(self.sa, 'event', 't', 'r', 'progress', 'progress', {'step': 1})
+        # Collect remote refs while keeping the saved files available to corrupt.
+        with patch('task_runtime.maintenance.retire_metadata', return_value={'status': 'eligible'}):
+            runtime.publish(self.sa, 'finish', 't', 'r', outcome='succeeded')
+        self.assertIsNone(self.sb.remote_tip(run['io_ref']))
+        path = 'tasks/t/runs/r/io/events/progress.json'
+        original = self.sa.snapshot().json(path)
+        self.commit_changes(self.sa, {path: encode(dict(original, payload={'step': 999}))})
+        before = self.sa.fetch()
+        with self.assertRaisesRegex(TaskError, 'differ from the finish manifest'):
+            task_io.IOStore(self.sb, 't', run).optional()
+        self.assertEqual(self.sa.fetch(), before)
+        self.commit_changes(self.sa, {path: encode(original)})
+        self.assertEqual(task_io.IOStore(self.sb, 't', run).optional().json('events/progress.json'), original)
 
     def test_completed_wake_receipt_cannot_grant_execution_again(self):
         self.setup_io(); self.send()

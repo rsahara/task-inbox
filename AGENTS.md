@@ -16,6 +16,17 @@ definitions; callers apply them to actual workers. Host provisioning, credential
 triggers and schedules belong to caller integrations. Never launch a subscriber from a task's signal
 publication or business completion hook.
 
+# Tests for implementation changes
+
+When adding or changing implementation code, add or update tests in the same
+change. Cover the intended behavior and relevant edge cases or failure paths;
+include regression coverage when fixing a bug. Use synthetic inputs and temporary
+repositories for integration tests.
+
+Run focused tests during development and the full suite before submitting code
+changes, following CONTRIBUTING.md. When reporting coverage, measure both lines
+and branches and include the Python subprocesses used by the CLI and workers.
+
 # Repository content boundaries
 
 Keep this repository focused on the reusable task-inbox tool. Do not include

@@ -1052,5 +1052,104 @@ class RuntimeStateValidationTest(RuntimeCase):
         self.assertEqual(runtime.check(self.sb, 't', 'r')['status'], 'running')
 
 
+class StopEvidenceTest(RuntimeCase):
+    def setUp(self):
+        super().setUp()
+        self.add()
+        self.run_record = self.start()
+        self.adapter = self.base / 'stop-adapter'
+        self.adapter.write_text('Adapter execution is replaced by a process response fixture.\n')
+
+    def evidence(self):
+        value = {key: self.run_record[key] for key in
+                 ('repository_id', 'authority_ref', 'task_id', 'run_id', 'generation')}
+        value.update(writer_stopped=True, children_stopped=True,
+                     external_operations_settled=True, pending_git_operations_settled=True,
+                     evidence='fixture:verified-stop')
+        return value
+
+    def assert_rejected(self, stdout, error, *, returncode=0):
+        before = self.sa.fetch()
+        original = lifecycle.git_support.run_process
+        response = subprocess.CompletedProcess([str(self.adapter)], returncode, stdout, b'PRIVATE_TOKEN')
+        adapter_call = Mock(return_value=response)
+
+        def respond(command, **kwargs):
+            if command == [str(self.adapter)]:
+                return adapter_call(command, **kwargs)
+            return original(command, **kwargs)
+
+        with patch.object(lifecycle.git_support, 'run_process', side_effect=respond):
+            with self.assertRaisesRegex(TaskError, error) as raised:
+                lifecycle.reconcile_stop(self.sb, 'recover', 't', 'r', str(self.adapter))
+        adapter_call.assert_called_once()
+        supplied_run = json.loads(adapter_call.call_args.kwargs['input'])
+        for key in ('repository_id', 'authority_ref', 'task_id', 'run_id', 'generation'):
+            self.assertEqual(supplied_run[key], self.run_record[key])
+        self.assertNotIn('PRIVATE_TOKEN', str(raised.exception))
+        self.assertEqual(self.sa.fetch(), before)
+        self.assertEqual(runtime.check(self.sa, 't', 'r')['status'], 'running')
+        self.assertEqual(runtime.load_task(self.sb.snapshot(), 't')[1]['slots']['1']['run_id'], 'r')
+
+    def test_stop_adapter_requires_an_existing_absolute_path(self):
+        before = self.sa.fetch()
+        for program in ('relative-adapter', str(self.base / 'missing'), str(self.base)):
+            with self.subTest(program=program), patch.object(lifecycle.git_support, 'run_process') as process:
+                with self.assertRaisesRegex(TaskError, 'absolute path to an installed executable'):
+                    lifecycle.reconcile_stop(self.sb, 'recover', 't', 'r', program)
+                process.assert_not_called()
+        self.assertEqual(self.sa.fetch(), before)
+        self.assertEqual(runtime.check(self.sa, 't', 'r')['status'], 'running')
+
+    def test_failed_adapter_cannot_release_ownership_even_with_valid_evidence(self):
+        self.assert_rejected(encode(self.evidence()), 'failed; ownership retained', returncode=1)
+
+    def test_malformed_non_object_and_oversized_evidence_cannot_release_ownership(self):
+        responses = [b'PRIVATE_TOKEN', b'\xff', b'null', b'[]', b'"PRIVATE_TOKEN"',
+                     encode(dict(self.evidence(), extra='x' * (1024 * 1024)))]
+        for number, response in enumerate(responses):
+            with self.subTest(case=number):
+                self.assert_rejected(response, 'returned invalid evidence')
+
+    def test_stop_evidence_must_match_every_execution_identity_field(self):
+        for key in ('repository_id', 'authority_ref', 'task_id', 'run_id', 'generation'):
+            for missing in (False, True):
+                value = self.evidence()
+                if missing:
+                    del value[key]
+                else:
+                    value[key] = 999 if key == 'generation' else 'other'
+                with self.subTest(field=key, missing=missing):
+                    self.assert_rejected(encode(value), 'belongs to another execution')
+
+    def test_every_stop_condition_requires_a_literal_true_confirmation(self):
+        for key in ('writer_stopped', 'children_stopped', 'external_operations_settled',
+                    'pending_git_operations_settled'):
+            for confirmation in (False, 1, None):
+                value = self.evidence()
+                if confirmation is None:
+                    del value[key]
+                else:
+                    value[key] = confirmation
+                with self.subTest(field=key, confirmation=confirmation):
+                    self.assert_rejected(encode(value), 'Executor evidence is missing: ' + key)
+
+    def test_stop_evidence_requires_a_nonempty_durable_reference(self):
+        for reference in (None, '', True, 1, [], {}):
+            value = self.evidence()
+            value['evidence'] = reference
+            with self.subTest(reference=reference):
+                self.assert_rejected(encode(value), 'durable evidence reference')
+
+    def test_stop_recovery_cannot_reuse_another_operations_identity(self):
+        before = self.sa.fetch()
+        with patch.object(lifecycle.git_support, 'run_process', wraps=lifecycle.git_support.run_process) as process:
+            with self.assertRaisesRegex(TaskError, 'already used for another recovery'):
+                lifecycle.reconcile_stop(self.sb, 'start-r', 't', 'r', str(self.adapter))
+        self.assertFalse(any(call.args[0] == [str(self.adapter)] for call in process.call_args_list))
+        self.assertEqual(self.sa.fetch(), before)
+        self.assertEqual(runtime.check(self.sa, 't', 'r')['status'], 'running')
+
+
 if __name__ == "__main__":
     unittest.main()
