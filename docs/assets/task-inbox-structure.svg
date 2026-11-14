@@ -1,0 +1,104 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1060" height="500" viewBox="0 0 1060 500" role="img" aria-labelledby="title description">
+  <title id="title">task-inbox: responsibilities and storage</title>
+  <desc id="description">The caller owns the execution host, Codex session prompt, tools and local state. task-inbox supplies coordination; the task worker follows task.md. Shared Git survives sessions. Its main branch contains task definitions, task data, output signals and ownership records. Separate task-io branches contain the inbox and run I/O, including heartbeat. TASK and RUN are placeholders for IDs.</desc>
+  <!-- Keep this layout fixed and labels short. Full paths and retention rules are in README.md. -->
+  <style>
+    text { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; fill: #172d3b; font-size: 18px; }
+    .heading { font-size: 22px; font-weight: 650; }
+    .label { font-size: 19px; font-weight: 600; }
+    .small { font-size: 16px; fill: #3e5361; }
+    .code { font-family: ui-monospace, "SFMono-Regular", Consolas, monospace; font-size: 17px; }
+    .host { fill: #f1f6ff; stroke: #6c88b3; stroke-width: 1.5; }
+    .session { fill: #fff; stroke: #9cb1cb; stroke-width: 1.5; }
+    .caller { fill: #e6efff; stroke: #9cb1cb; }
+    .task { fill: #eaf7f1; stroke: #81b29a; }
+    .runtime { fill: #f1edfb; stroke: #aaa0ca; }
+    .git { fill: #fafbfc; stroke: #8a9aa7; stroke-width: 1.5; }
+    .main { fill: #fff; stroke: #aebbc5; }
+    .directory { fill: #f8fafb; stroke: #c2ccd3; }
+    .local { fill: #f5f7f9; stroke: #b7c2cb; }
+  </style>
+  <rect width="1060" height="500" fill="#fff"/>
+
+  <g id="caller-host" aria-label="Caller-owned execution">
+    <rect class="host" x="16" y="16" width="350" height="468" rx="12"/>
+    <text class="heading" x="34" y="46">Caller / execution</text>
+    <text class="small" x="34" y="71">Codex: Cloud · local · Actions runner</text>
+
+    <g id="codex-session" aria-label="Codex session and executor context">
+      <rect class="session" x="32" y="88" width="318" height="308" rx="9"/>
+      <text class="label" x="48" y="115">Codex session</text>
+
+      <rect class="caller" x="48" y="130" width="286" height="64" rx="7"/>
+      <text class="label" x="64" y="155">Session prompt</text>
+      <text x="64" y="180">bootstrap + caller policy</text>
+
+      <rect class="runtime" x="48" y="208" width="286" height="78" rx="7"/>
+      <text class="label" x="64" y="236">task-inbox + executor</text>
+      <text class="small" x="64" y="263">ownership · sync · heartbeat</text>
+
+      <rect class="task" x="48" y="300" width="286" height="78" rx="7"/>
+      <text class="label" x="64" y="328">Task worker</text>
+      <text class="small" x="64" y="355">task.md + scripts + run context</text>
+    </g>
+
+    <g id="private-state" aria-label="Private local executor state">
+      <rect class="local" x="32" y="412" width="318" height="56" rx="7"/>
+      <text x="48" y="436">Workspace · logs · local markers</text>
+      <text class="small" x="48" y="457">Host-local; may disappear</text>
+    </g>
+  </g>
+
+  <g id="shared-git" aria-label="Shared task-data repository">
+    <rect class="git" x="390" y="16" width="654" height="468" rx="12"/>
+    <text class="heading" x="408" y="46">Shared Git / survives sessions</text>
+
+    <g id="main-branch" aria-label="Main authority branch">
+      <rect class="main" x="408" y="64" width="618" height="246" rx="9"/>
+      <text class="label" x="424" y="90">main</text>
+      <text class="small" x="482" y="90">authority branch</text>
+
+      <g id="task-directory" aria-label="Task directory on main">
+        <rect class="directory" x="424" y="104" width="586" height="190" rx="7"/>
+        <text class="code" x="440" y="130">tasks/TASK/</text>
+
+        <rect class="task" x="440" y="142" width="268" height="80" rx="6"/>
+        <text class="label" x="454" y="166">Task definition</text>
+        <text class="code" x="454" y="190">task.json · task.md</text>
+        <text class="small" x="454" y="210">scripts / runbooks</text>
+
+        <rect class="runtime" x="440" y="232" width="268" height="50" rx="6"/>
+        <text x="454" y="253">Run ownership</text>
+        <text class="small" x="454" y="274">runtime.json · accepted receipts</text>
+
+        <g id="task-data" aria-label="Task-owned permanent data and output signals">
+          <rect class="task" x="720" y="142" width="274" height="140" rx="6"/>
+          <text class="label" x="734" y="166">Task data</text>
+          <text class="code" x="734" y="190">data/*</text>
+          <text class="small" x="828" y="190">outputs / ledgers</text>
+
+          <rect class="task" x="734" y="206" width="246" height="62" rx="5"/>
+          <text x="746" y="230">Signals (output)</text>
+          <text class="code" x="746" y="254">signals/*.json</text>
+        </g>
+      </g>
+    </g>
+
+    <g id="inbox-branch" aria-label="Inbox branch in shared Git">
+      <rect class="runtime" x="408" y="326" width="302" height="142" rx="9"/>
+      <text class="label" x="424" y="355">Inbox branch</text>
+      <text class="code" x="424" y="386">task-io/TASK/inbox</text>
+      <text class="code" x="424" y="416">messages/*</text>
+      <text class="small" x="424" y="446">Incoming requests</text>
+    </g>
+
+    <g id="run-io-branch" aria-label="Run I/O branch in shared Git including heartbeat">
+      <rect class="runtime" x="724" y="326" width="302" height="142" rx="9"/>
+      <text class="label" x="740" y="355">Run I/O branch</text>
+      <text class="code" x="740" y="386">task-io/TASK/runs/RUN</text>
+      <text class="code" x="740" y="416">state.json</text>
+      <text class="small" x="858" y="416">heartbeat</text>
+      <text class="small" x="740" y="446">events/* · results/*</text>
+    </g>
+  </g>
+</svg>

@@ -49,54 +49,14 @@ declarations, adapters, continuation, recovery and migration.
 
 ### Responsibility and storage map
 
-The nesting below describes logical responsibilities and data placement in a
-Codex deployment; other executors use the same Git storage contract.
-The execution host supplies Codex sessions, prompts, tools and private working
-state. Shared Git data outlives those sessions. An installed adapter may run a
-worker in another process or session; the boxes do not require a single process.
-The session prompt supplies caller bootstrap instructions; `task.md` is the
-persistent business prompt supplied to the worker with its admitted context.
+Execution is caller-owned; task definitions and data live in shared Git.
+The session prompt supplies bootstrap policy; `task.md` supplies business instructions.
 
-```mermaid
-flowchart TB
-    subgraph HOST["Codex Cloud / local / GitHub Actions runner — caller-owned"]
-        direction TB
-        subgraph SESSION["Codex session / executor context"]
-            direction TB
-            PROMPT["Codex session prompt<br/>Caller bootstrap and execution policy"]
-            subgraph TOOL["task-inbox — common coordination"]
-                RUNTIME["Readiness, ownership,<br/>signal sync and run I/O"]
-            end
-            WORKER["Task execution — task-owned<br/>Worker prompt and business tools<br/>Pinned definition + admitted context"]
-        end
-        PRIVATE["Private executor state<br/>Workspace, logs and execution marker<br/>May disappear with the host"]
-    end
-    subgraph GIT["Shared task-data Git repository"]
-        direction TB
-        subgraph MAIN["Authority branch: main"]
-            direction TB
-            subgraph TASKDIR["Task directory: tasks/TASK/"]
-                DEFINITION["Task definition — application-owned<br/>task.json, task.md, scripts/runbooks"]
-                subgraph DATA["Permanent task data: data/ — task-owned"]
-                    OUTPUT["Outputs, ledgers and evidence"]
-                    SIGNAL["Signals (output)<br/>signals/SIGNAL.json"]
-                    OUTPUT ~~~ SIGNAL
-                end
-                RECORDS["Runtime-managed authority records<br/>runtime.json<br/>io/receipts/MESSAGE.json"]
-            end
-        end
-        INBOX["Inbox branch<br/>task-io/TASK/inbox<br/>messages/MESSAGE.json"]
-        RUNIO["Run I/O branch<br/>task-io/TASK/runs/RUN<br/>state.json: heartbeat<br/>events/* and results/*"]
-    end
-    %% Invisible links arrange boxes without implying execution order.
-    PROMPT ~~~ RUNTIME
-    RUNTIME ~~~ WORKER
-    WORKER ~~~ PRIVATE
-    DEFINITION ~~~ OUTPUT
-    SIGNAL ~~~ RECORDS
-    RECORDS ~~~ INBOX
-    INBOX ~~~ RUNIO
-```
+[![Caller-owned execution and shared Git storage, with task definitions, data, signals, inbox and run I/O](docs/assets/task-inbox-structure.svg)](docs/assets/task-inbox-structure.svg)
+
+The SVG uses a fixed, compact layout; open it for a larger view. Boxes show
+logical responsibilities: an adapter can use separate worker processes/sessions.
+Other executors use the same Git storage contract.
 
 `TASK`, `RUN`, `MESSAGE` and `SIGNAL` are placeholders. Paths and branch names
 show the default layout; task directories, `data_path`, the authority branch and
