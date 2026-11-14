@@ -287,7 +287,8 @@ Codex prompt/model/tools; task instructions are the same as on other hosts.
 This example assumes a self-hosted runner with an adopted, immutable tool and
 executor already installed at the illustrative `/opt` paths. It operates on the
 workflow repository as its task-data repository and an inbox-driven `report`
-task. Adapt the inbox branch if its configured I/O namespace differs. This is a
+task. Install this workflow on main (the repository's default branch).
+Inbox-only producers must send the explicit dispatch described below. This is a
 documentation example, not a workflow installed by task-inbox.
 
 ```yaml
@@ -297,7 +298,7 @@ on:
   repository_dispatch:
     types: [task-input-ready]
   push:
-    branches: [main, task-io/report/inbox]
+    branches: [main]
 permissions:
   contents: write
 concurrency:
@@ -344,12 +345,21 @@ slot or recover an unknown launch just because its old runner vanished.
 The workflow integration must inspect the returned `pending_tasks`/`next` plan,
 and check configured consumers outside its execution allowlist when routing
 other tasks. Notifications saved by `signal sync` do not start Actions by
-themselves. A normal authenticated Git push can trigger the `push` entry;
-pushes made with `GITHUB_TOKEN` do not recursively trigger push workflows.
-Use an explicit authenticated `repository_dispatch` or `workflow_dispatch` hint
-from the caller when a configured consumer is ready; those dispatch events can
-start workflows using `GITHUB_TOKEN` with the required repository permissions.
-Do not dispatch unconditionally after every finish, which can create a loop.
+themselves. A normal authenticated push to main can trigger the `push` entry.
+An inbox-only push needs another startup path even with ordinary Git credentials:
+GitHub evaluates a push workflow from the pushed ref, and a newly created
+task-inbox inbox branch contains data, not a workflow. Merely adding that branch
+to a workflow's main-branch YAML does not install the workflow on the inbox ref.
+
+This example uses explicit authenticated `repository_dispatch` hints for
+inbox-only delivery, for both ordinary Git credentials and `GITHUB_TOKEN`.
+The caller first confirms `io send`/`signal sync` delivery and the configured
+consumer's readiness, then dispatches to the workflow on the default branch.
+Pushes made with `GITHUB_TOKEN` do not recursively trigger push workflows, so
+the same explicit hint also covers token-authenticated writes to main.
+`repository_dispatch` and `workflow_dispatch` can start workflows using
+`GITHUB_TOKEN` with the required repository permissions. Do not dispatch
+unconditionally after every finish, which can create a loop.
 
 For the example consumer, a caller that has confirmed ready pending work can
 send the hint below. Install `gh` and bind `GH_TOKEN` to the caller's authorized
