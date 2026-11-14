@@ -139,6 +139,15 @@ Tasks without a declaration remain manual; `--force` explicitly requests the
 first task once. Existing `io wake` and `run` commands remain available for
 integrations managing individual lifecycle steps.
 
+For **Codex Cloud schedules or local Codex sessions**, keep a short caller
+bootstrap prompt that references the canonical procedure; give the admitted
+worker its pinned task instructions and context. The current session needs an
+installed worker adapter to use `execute` for launch. For **GitHub Actions**, the
+workflow provisions that adapter and calls the same entrypoint; it also owns
+startup hints and workflow-rerun identity. See [Codex prompts](docs/task-execution.md#codex-cloud-and-local-prompts)
+and the [Actions workflow example](docs/task-execution.md#github-actions-caller),
+including the compatibility procedure for an interactive worker without an adapter.
+
 ### Process inbox requests in a loop
 
 Use the inbox to accept requests now and process them when a worker next runs.

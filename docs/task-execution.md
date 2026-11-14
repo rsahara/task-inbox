@@ -197,6 +197,174 @@ The entrypoint does not automatically recover or retry external operations.
 An idempotent caller intent is not an exactly-once guarantee for arbitrary
 external effects; existing operation IDs and receiver receipts remain required.
 
+## Codex Cloud and local prompts
+
+A Codex scheduled invocation and a local Codex session are caller integrations.
+Keep their entry prompt short and version the canonical caller procedure in the
+task-data repository. Resolve task directories from immutable task IDs. Fetch
+and pin the adopted main commit in a clean control checkout; preserve existing
+user work and unfinished caller/run state. Read the caller policy and instructions
+at that commit, then use the admitted run's pinned workspace for the task itself.
+Do not reset a user's primary checkout to bootstrap a scheduled run.
+
+| Prompt | Contents | Lifecycle owner |
+| --- | --- | --- |
+| Caller/bootstrap prompt | Repository, allowed task IDs, canonical caller-procedure reference, how to resume the original invocation, and the authorized continuation policy | Caller chooses capabilities, model, tools and placement, and enters the runtime |
+| Task/worker prompt | Admitted context, task instructions from its pinned workspace, owned inputs/outputs and required completion evidence | Existing admitted run; no second admission or subscriber startup |
+
+Do not copy business steps, eligibility rules or recovery logic into every
+schedule prompt. Keep those in task instructions and the common caller procedure.
+The task prompt does not detect Cloud/local/Actions or choose output consumers.
+The caller may configure a model or request another capable worker. A request
+to run a task is distinct from a verified business result.
+
+For example, a **caller bootstrap prompt** can be:
+
+```text
+Act as caller for <task-data repository>, with allowed task IDs <allowlist>.
+Preserve unfinished work and the original invocation/operation IDs. Fetch and
+pin main in a clean control checkout, then read <canonical caller procedure>
+and its policy at that commit. Use the adopted task-inbox entrypoint and the
+installed executor profile. Continue only if that policy explicitly permits it,
+within its task allowlist and bound. Reconcile unknown outcomes before new work.
+```
+
+An executor using `execute` can assemble this **worker prompt** from its context:
+
+```text
+Process only the already-admitted task/run/generation in the supplied context.
+Read task.md and its linked business instructions in context.workspace at
+context.task_path. Use the declared inputs and preserve original operation IDs.
+Save and read back outputs before acknowledging captured requests. Return the
+verified result and required completion evidence to the executor. Do not admit
+another run, finish the caller-owned lifecycle, or start a downstream task.
+```
+
+The executor atomically writes the bound result described above; `execute` owns
+terminal finish. Adapt an older task driver that starts/finishes its own run
+before using this prompt. Do not wrap that driver unchanged and acquire twice.
+
+### When the worker is the current Codex session
+
+`execute --executor` starts an installed executable. It does not attach to the
+current conversation, interpret Markdown as a model invocation, or provide a
+built-in Codex CLI/Cloud API adapter. If the caller has an installed adapter that
+can invoke a Codex worker, use `execute` normally; that adapter supplies prompts,
+tools and result verification. The bootstrap session remains the caller.
+
+If work must happen directly in the current session's tools and no such adapter
+is installed, `execute --check` supplies readiness only. The caller must use the
+existing [individual lifecycle procedure](task-io.md#requests-and-startup) to
+admit and prepare one run, supply an independent heartbeat, perform or delegate
+the task, verify its evidence, and finish that same run. Follow its existing
+completion contract rather than the adapter-owned finish convention above.
+This is the compatibility bridge, not an implemented `execute --inline` mode.
+Never call `execute`, `run start` or `io wake` from an already-admitted worker.
+After finish, the caller can check again and explicitly choose another task;
+each one still needs its own run, slot and heartbeat.
+
+Cloud schedules and local invocations use the same task instructions and input
+contracts. The caller supplies credentials, capability bindings and an invocation
+ID saved before mutation. A resumed invocation reuses that ID; a new scheduled
+tick gets a new one. Cloud/private state may disappear, so inspect main and saved
+receipts instead of assuming an old process stopped. A local surviving execution
+marker can support normal reconciliation. Neither prompt changes its schedule,
+deploys its own prompt, or treats schedule delivery as task completion.
+Scheduling does not change readiness: use the declared inbox/condition checks,
+or explicitly `--force` the first manual task when caller policy permits it.
+
+## GitHub Actions caller
+
+The workflow is the caller. It provisions Git/Python, authentication, author
+identity and the trusted runtime/executor outside the task-data checkout. Use
+full history for runtime reconciliation and the transport permissions described
+in [deployment acceptance](task-runtime-deployment.md). The executor supplies any
+Codex prompt/model/tools; task instructions are the same as on other hosts.
+
+This example assumes a self-hosted runner with an adopted, immutable tool and
+executor already installed at the illustrative `/opt` paths. It operates on the
+workflow repository as its task-data repository and an inbox-driven `report`
+task. Adapt the inbox branch if its configured I/O namespace differs. This is a
+documentation example, not a workflow installed by task-inbox.
+
+```yaml
+name: Process task inbox
+on:
+  workflow_dispatch:
+  repository_dispatch:
+    types: [task-input-ready]
+  push:
+    branches: [main, task-io/report/inbox]
+permissions:
+  contents: write
+concurrency:
+  group: task-inbox-report
+  cancel-in-progress: false
+jobs:
+  consume:
+    runs-on: [self-hosted, linux]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: main
+          fetch-depth: 0
+          path: task-data
+      - name: Execute the allowed task
+        shell: bash
+        env:
+          TASK_DATA_REPO: ${{ github.workspace }}/task-data
+          TASK_INBOX_TOOL: /opt/task-inbox/task-inbox.pyz
+          TASK_EXECUTOR: /opt/task-inbox/worker-executor
+        run: |
+          set -euo pipefail
+          git -C "$TASK_DATA_REPO" config user.name task-worker
+          git -C "$TASK_DATA_REPO" config user.email task-worker@example.invalid
+          python3 "$TASK_INBOX_TOOL" --repo "$TASK_DATA_REPO" \
+            --operation-id "actions-${GITHUB_RUN_ID}-report" execute \
+            --task report --runner "actions-${GITHUB_RUN_ID}" \
+            --executor "$TASK_EXECUTOR" \
+            > "$RUNNER_TEMP/task-inbox-result.json"
+```
+
+For authorized chaining, repeat `--task` with the caller's allowed targets and
+add `--continue --max-tasks N`; the default above admits at most one task.
+Supply condition adapters and business completion contracts when the selected
+tasks require them. GitHub concurrency only reduces competing workflow runs;
+runtime slots and execution claims still govern local, Cloud and Actions callers.
+
+`GITHUB_RUN_ID` stays the same for a workflow rerun. Excluding `GITHUB_RUN_ATTEMPT`
+from the operation ID makes a rerun reconcile the original intent rather than
+blindly launch the worker again. Preserve the adopted adapter hashes across that
+retry. A new workflow run has a new caller ID, but cannot bypass an occupied task
+slot or recover an unknown launch just because its old runner vanished.
+
+The workflow integration must inspect the returned `pending_tasks`/`next` plan,
+and check configured consumers outside its execution allowlist when routing
+other tasks. Notifications saved by `signal sync` do not start Actions by
+themselves. A normal authenticated Git push can trigger the `push` entry;
+pushes made with `GITHUB_TOKEN` do not recursively trigger push workflows.
+Use an explicit authenticated `repository_dispatch` or `workflow_dispatch` hint
+from the caller when a configured consumer is ready; those dispatch events can
+start workflows using `GITHUB_TOKEN` with the required repository permissions.
+Do not dispatch unconditionally after every finish, which can create a loop.
+
+For the example consumer, a caller that has confirmed ready pending work can
+send the hint below. Install `gh` and bind `GH_TOKEN` to the caller's authorized
+repository token; keep that binding out of task instructions and signal data.
+
+```sh
+gh api --method POST "repos/$GITHUB_REPOSITORY/dispatches" \
+  -f event_type=task-input-ready
+```
+
+Keep the hint separate from durable message delivery: a failed dispatch leaves
+the inbox pending, does not undo the producer's saved output and must not cause
+the producer's computation to repeat. A later manual invocation or an existing
+scheduled caller rechecks it. The example intentionally leaves that host-specific
+follow-up integration to the deployment; it does not guarantee a further startup
+on its own. A fresh runner missing execution evidence returns to the existing
+recovery procedure. See [retry and recovery](#retry-and-recovery).
+
 ## Migration and further consolidation
 
 This is additive to schema-2 task definitions and schema-9/10 repositories; there
