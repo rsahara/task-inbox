@@ -65,7 +65,7 @@
         <rect class="task" x="440" y="142" width="268" height="80" rx="6"/>
         <text class="label" x="454" y="166">Task definition</text>
         <text class="code" x="454" y="190">task.json · task.md</text>
-        <text class="small" x="454" y="210">scripts / runbooks</text>
+        <text class="small" x="454" y="210">agent config · prompts · scripts</text>
 
         <rect class="runtime" x="440" y="232" width="268" height="50" rx="6"/>
         <text x="454" y="253">Run ownership</text>

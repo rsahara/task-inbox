@@ -65,8 +65,8 @@ while inbox and live run I/O use separate branches in the same repository.
 
 | Responsibility | Authoritative data location in the default layout |
 | --- | --- |
-| Caller: host, model, credentials, prompts and startup/continuation policy | Caller integration and installed executor profile; the session prompt references canonical instructions |
-| Task: definition and business behavior | `main:tasks/TASK/task.json`, `task.md`, and linked scripts/runbooks |
+| Caller: host, actual model/tools, credentials and startup/continuation policy | Caller integration and installed executor profile; bootstrap references canonical instructions |
+| Task: definition, worker prompt and preferred model/effort | `main:tasks/TASK/task.json`, `task.md`, task-owned agent configuration and linked prompts/scripts/runbooks |
 | Task: permanent outputs and current output signals | `main:tasks/TASK/data/*`, including `data/signals/SIGNAL.json` |
 | Runtime: inbox protocol, with requests submitted by producers | Branch `task-io/TASK/inbox`, under `messages/` |
 | Runtime: per-run I/O and heartbeat | Branch `task-io/TASK/runs/RUN`, containing `state.json`, `events/`, `results/` |

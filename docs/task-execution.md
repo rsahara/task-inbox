@@ -13,8 +13,8 @@ shows the caller/session boundary alongside shared Git branches and task data.
 
 | Owner | Responsibilities |
 | --- | --- |
-| Task | Declare handled inbox kinds, read/written signal types, required business capabilities and readiness; process inputs; save owned outputs and signals; verify results before acknowledging captured requests. |
-| Caller | Choose an explicit task allowlist, executor capabilities, credentials, model, host, startup triggers, continuation permission and bound. |
+| Task | Declare handled inbox kinds, read/written signal types, required business capabilities and readiness; own task-specific prompts and preferred model/effort; process inputs; save owned outputs and signals; verify results before acknowledging captured requests. |
+| Caller | Choose an explicit task allowlist, executor capabilities, credentials, host, startup triggers, continuation permission and bound; apply task preferences to actual model/effort settings. |
 | task-inbox | Durable messages and signal synchronization, fixed-snapshot readiness, run admission, ownership, heartbeat, execution claims, finish, recovery and a final pending-work check. |
 | Installed adapter | Translate the portable execution context into a script/agent invocation; evaluate application conditions if requested; verify business outcomes and return bound evidence. |
 
@@ -202,6 +202,38 @@ external effects; existing operation IDs and receiver receipts remain required.
 
 ## Codex Cloud and local prompts
 
+Keep task-specific worker prompts, scripts and preferred model/effort in the task
+directory, alongside `task.md`. An application can use an `agent.json` convention:
+
+```json
+{
+  "schema_version": 1,
+  "model": "example-model",
+  "reasoning_effort": "medium",
+  "fork_turns": "none",
+  "prompts": {"worker": "prompts/worker.txt"}
+}
+```
+
+This is an application convention, not a built-in 2.13 configuration schema:
+`execute` does not parse or enforce `agent.json`. The trusted executor adapter
+reads and validates the task-owned configuration and prompt from the admitted
+`run.definition_commit`, confines prompt paths to that task directory, and applies
+preferences to the worker it provisions. Use the same task-owned worker prompt
+on Cloud, local and Actions; inject only generic admitted context. The caller
+keeps host paths, credentials, triggers and deployment policy outside the task.
+If a preference is unsupported, report it or use an explicitly authorized fallback.
+Reading a prompt cannot change the model of an already running Codex session.
+When configuring an authorized Cloud schedule or local/Actions worker, inspect
+the same fixed task configuration and verify the applied settings separately
+from prompt delivery. Do not change schedule timing or enabled state implicitly.
+
+Put task-specific executables in task directories rather than adding root `bin`
+wrappers. Generic profile validation and fixed-commit prompt loading are candidates
+for a future `execute` context contract; keep them in the trusted application
+adapter until that contract is implemented. Readiness, admission, supervision,
+durable launch claims and bounded continuation already belong to this tool.
+
 A Codex scheduled invocation and a local Codex session are caller integrations.
 Keep their entry prompt short and version the canonical caller procedure in the
 task-data repository. Resolve task directories from immutable task IDs. Fetch
@@ -212,7 +244,7 @@ Do not reset a user's primary checkout to bootstrap a scheduled run.
 
 | Prompt | Contents | Lifecycle owner |
 | --- | --- | --- |
-| Caller/bootstrap prompt | Repository, allowed task IDs, canonical caller-procedure reference, how to resume the original invocation, and the authorized continuation policy | Caller chooses capabilities, model, tools and placement, and enters the runtime |
+| Caller/bootstrap prompt | Repository, allowed task IDs, canonical caller-procedure reference, how to resume the original invocation, and the authorized continuation policy | Caller provisions capabilities, applies task model preferences, chooses tools and placement, and enters the runtime |
 | Task/worker prompt | Admitted context, task instructions from its pinned workspace, owned inputs/outputs and required completion evidence | Existing admitted run; no second admission or subscriber startup |
 
 Do not copy business steps, eligibility rules or recovery logic into every
@@ -411,3 +443,13 @@ The last three rows are audit candidates, not newly implemented generic services
 Move mechanics only after their failure/recovery tests can run with synthetic
 data and no private service dependency. Avoid importing application task IDs,
 instructions, payloads, logs or deployment settings into this tool repository.
+
+
+An Actions integration can share one provider runner across workflows: pass the
+allowed task ID, admitted definition commit and host capability bindings to that
+runner. It reads the task-owned profile and prompt at that commit and supplies
+model/effort as actual provider invocation arguments. Keep those values out of
+individual workflow files. Task-specific validation scripts stay with their task
+and must be read at the same definition; credentials and process supervision stay
+in the caller. This is an adapter pattern, not built-in `agent.json` interpretation
+by `execute`.
