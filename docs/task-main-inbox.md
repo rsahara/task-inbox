@@ -125,6 +125,9 @@ Before collection, explicit worker commits are preserved remotely under
 `refs/tags/task-work-history/<task-id>/<run-id>`. These history tags are retained
 independently of disposable run refs and metadata. Reverting an earlier published
 file, or deleting a published new file, is captured by the next publish/finish.
+Discard finish can use the accepted authority tree from another clone without
+access to local publication snapshots. It leaves unpublished workspace files and
+deferred input results unadopted.
 
 Use `run finish --input-results-file results.json` with an object mapping captured
 message IDs to verified result objects, e.g. `{"request-1":{"status":"succeeded"}}`.

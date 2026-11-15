@@ -654,7 +654,11 @@ def _publish(store, operation_id, task_id, run_id, *, outcome=None, summary="", 
                     raise TaskError("Prepare or restore the run workspace before publishing or finishing")
                 if run["publication_count"] and not authority_inbox:
                     store.fetch(run["work_ref"])
-                source, touched = Snapshot(store, run["source_head"]), set()
+                # Schema 11 snapshots are local-only. Discard adopts no new
+                # workspace output, so use the durable accepted authority tree
+                # even when the publishing clone and its snapshot are gone.
+                source, touched = (store.snapshot() if authority_inbox else
+                                   Snapshot(store, run["source_head"])), set()
             preparation = {"request_hash": digest(request), "source_head": source.commit,
                            "previous_source": run["source_head"], "generation": run["generation"],
                            "touched": sorted(touched), "work_ref": run["work_ref"],
@@ -678,7 +682,8 @@ def _publish(store, operation_id, task_id, run_id, *, outcome=None, summary="", 
                     preparation['cleanup']['work_head'] = store.remote_tip(run['work_ref'])
             atomic_json(operation_path, preparation)
         source = Snapshot(store, preparation["source_head"])
-        baseline = Snapshot(store, preparation["previous_source"])
+        baseline = (source if authority_inbox and discard_output else
+                    Snapshot(store, preparation["previous_source"]))
         def apply(snapshot):
             task, runtime, run = load_run(snapshot, task_id, run_id, live=True)
             if run["generation"] != preparation["generation"] or run["source_head"] != preparation["previous_source"]:

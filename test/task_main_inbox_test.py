@@ -140,6 +140,33 @@ class MainInboxTest(RuntimeCase):
         self.assertIsNone(snap.read('tasks/source/data/unadopted.txt'))
         self.assertTrue((work / 'tasks/source/data/unadopted.txt').exists())
 
+    def test_another_clone_can_discard_after_publish_without_the_local_snapshot(self):
+        task_io.send(self.sa, 'request-discard', 'source', 'input', 'work', {})
+        work = self.run_source('remote-discard', [])
+        accepted = 'tasks/source/data/accepted.txt'
+        unadopted = 'tasks/source/data/unadopted.txt'
+        self.output(work, accepted, b'accepted\n')
+        main_io.stage_results(self.sa, 'source', 'remote-discard', {'input': dict(status='succeeded')})
+        published = runtime.publish(self.sa, 'publish-discard', 'source', 'remote-discard')
+        self.output(work, accepted, b'not adopted\n')
+        self.output(work, unadopted)
+        self.sb.snapshot()
+        self.assertNotEqual(self.command('git', '-C', str(self.b), 'cat-file', '-e',
+                                         published['source_head'] + '^{commit}', ok=False).returncode, 0)
+        result = runtime.publish(self.sb, 'remote-cancel', 'source', 'remote-discard',
+                                 outcome='cancelled', discard_output=True)
+        snap = self.sa.snapshot()
+        self.assertEqual(result['status'], 'cancelled')
+        self.assertIsNone(runtime.load_task(snap, 'source')[1]['slots']['1']['run_id'])
+        self.assertEqual(snap.read(accepted), b'accepted\n')
+        self.assertIsNone(snap.read(unadopted))
+        self.assertEqual((work / accepted).read_bytes(), b'not adopted\n')
+        self.assertTrue((work / unadopted).exists())
+        self.assertEqual([m['id'] for m in task_io.pending(self.sa, 'source')['messages']], ['input'])
+        self.assertTrue(git(self.b, 'cat-file', '-e', result['source_head'] + '^{commit}', predicate=True))
+        self.assertEqual(runtime.publish(self.sa, 'remote-cancel', 'source', 'remote-discard',
+                                        outcome='cancelled', discard_output=True)['source_head'], result['source_head'])
+
     def test_finish_captures_restored_and_deleted_published_files(self):
         name = 'tasks/source/data/existing.txt'
         new = 'tasks/source/data/new.txt'
