@@ -51,20 +51,27 @@ The SVG uses a fixed, compact layout; open it for a larger view. Boxes show
 logical responsibilities: an adapter can use separate worker processes/sessions.
 Other executors use the same Git storage contract.
 
-`TASK`, `RUN`, `MESSAGE` and `SIGNAL` are placeholders. Paths and branch names
+The map shows schema 11, adopted explicitly with `io migrate` (see
+[migration](docs/task-main-inbox.md#migration-and-host-integration)). `TASK`,
+`RUN`, `MESSAGE` and `SIGNAL` are placeholders. Paths and branch names
 show the default layout; task directories, `data_path`, the authority branch and
 I/O namespace can be configured. Task definitions and signals are files on main,
-while inbox and live run I/O use separate branches in the same repository.
+alongside inbox messages, accepted receipts and run events. Heartbeat history
+uses a separate run branch in the same repository.
 
 | Responsibility | Authoritative data location in the default layout |
 | --- | --- |
-| Caller: host, actual model/tools, credentials and startup/continuation policy | Caller integration and installed executor profile; bootstrap references canonical instructions |
+| Caller: host, actual model/tools, credentials and policy for subsequent invocations | Caller integration and installed executor profile; bootstrap references canonical instructions |
 | Task: definition, worker prompt and preferred model/effort | `main:tasks/TASK/task.json`, `task.md`, task-owned agent configuration and linked prompts/scripts/runbooks |
 | Task: permanent outputs and current output signals | `main:tasks/TASK/data/*`, including `data/signals/SIGNAL.json` |
-| Runtime: inbox protocol, with requests submitted by producers | Branch `task-io/TASK/inbox`, under `messages/` |
-| Runtime: per-run I/O and heartbeat | Branch `task-io/TASK/runs/RUN`, containing `state.json`, `events/`, `results/` |
+| Runtime: inbox protocol, with requests submitted by producers | `main:tasks/TASK/io/inbox/messages/MESSAGE.json` |
+| Runtime: immutable run events | `main:tasks/TASK/runs/RUN/io/events/` |
+| Runtime: per-run heartbeat | Branch `task-io/TASK/runs/RUN`, containing `state.json` |
 | Runtime: ownership and accepted receipts | `main:tasks/TASK/runtime.json` and `io/receipts/MESSAGE.json` |
 | Caller routing and runtime coordination metadata | `main:.task-system/`, including signal subscriptions and operation receipts |
+
+Before schema 11 migration, inboxes use `task-io/TASK/inbox` and run streams
+also hold events and result candidates; see [legacy storage](docs/task-io.md#legacy-storage-before-schema-11).
 
 Main remains the authority for ownership and accepted results. A heartbeat on a
 run branch does not grant a slot. Work checkpoints use another runtime branch,
@@ -113,18 +120,24 @@ persistent service are required, and any Git host meeting the
 ## Quick start
 
 Clone this source repository and run the commands below from its root. Replace
-`/path/to/task-data` with a separate clone of your task-data repository with an
+`/path/to/task-data` with a separate clone of a new task-data repository with an
 `origin` remote. Create a Markdown file containing your task's instructions and
 use its path in place of `/path/to/task.md`.
 
 ```sh
 python3 bin/task-inbox --repo /path/to/task-data --operation-id setup init
+python3 bin/task-inbox --repo /path/to/task-data --operation-id setup-main-inbox \
+  io migrate --confirm-writers-drained
 python3 bin/task-inbox --repo /path/to/task-data --operation-id add-example \
   task add --id example --title 'Example task' --body-file /path/to/task.md
 python3 bin/task-inbox --repo /path/to/task-data task list
 ```
 
-You can customize task and output locations when registering tasks. See
+The migration command enables schema 11 in this new repository, with no existing
+writers or runs to drain. For an existing installation, follow the
+[coordinated migration procedure](docs/task-main-inbox.md#migration-and-host-integration)
+before confirming writer drain. You can customize task and output locations
+when registering tasks. See
 [configuration and task management](docs/task-runtime.md).
 
 ## Send work to a task
@@ -144,8 +157,11 @@ with `run prepare`. Neither `wake` nor a Git push launches a worker. Reuse the
 same operation ID when retrying an operation. See the [worker and message
 workflow](docs/task-io.md#requests-and-startup) for execution, results, and finish.
 
-Complete a reconciled request with `io complete`, reusing one operation ID for
-retries. A run with a business completion contract can supply terminal evidence
+For schema 11, pass captured, verified input results to
+`run finish --input-results-file` to accept them atomically with output, slot
+release and subscriber notifications. `io complete` remains available for an
+explicit mid-run acknowledgement; reuse one operation ID for retries. A run with
+a business completion contract can supply terminal evidence
 with `run finish --completion-file`; use `run completion` to persist unknown
 outcomes before reconciliation. See [progress and results](docs/task-io.md#progress-external-operations-and-results).
 
@@ -182,15 +198,18 @@ themselves can use this equivalent loop; an LLM agent handles requests according
 to the task's Markdown instructions:
 
 1. Producers submit requests with `io send`. Requests remain pending until a
-   worker acknowledges a result with `io complete`.
+   worker explicitly records a verified result.
 2. Your scheduler or controller calls `io wake`. On `action=start`, it prepares
    the returned run and starts the worker. On `busy` or `paused`, requests stay
    pending; on `idle`, there is no inbox work to start.
 3. The worker reads requests with `io pending`, performs the requested work,
-   verifies the outcome, and records each result with `io complete`. It fetches
-   pending requests again after each acknowledgement, so requests arriving
-   during execution are included in the loop.
-4. Once the inbox is drained, the worker finishes with `run finish`. The
+   verifies the outcome, and captures results for the messages it handled. Under
+   schema 11 it can defer those results to finish; `io complete` accepts an
+   individual result immediately. When fetching additions, exclude captured
+   messages awaiting finish so they are not processed twice.
+4. Once the captured batch is complete, the worker finishes with
+   `run finish --input-results-file results.json` on schema 11. This accepts only
+   the supplied results; later arrivals stay pending. The
    controller checks the inbox again and wakes another run if needed. Each
    scheduled invocation also checks pending requests, so work arriving after
    the worker stops can be picked up on the next invocation.
@@ -217,11 +236,11 @@ Copied installations run independently of this repository. See
 
 ## Task signals
 
-Runtime 2.12 adds optional typed task signals, configurable inbox subscriptions,
-and inbox-based reconciliation. Publish, finish and task startup synchronize
-current state from Git without a delivery ledger.
-See [signals and migration](docs/task-signals.md); enable schema 10 only after
-all deployed readers/writers are updated and existing runs have drained.
+Runtime 2.14 with schema 11 adds declared signal IDs, automatic revisions and
+`change`/`run` subscriptions. Successful finish saves outputs and subscriber
+messages in the same main commit; intermediate publication does not deliver
+signals. See the [main inbox and signal protocol](docs/task-main-inbox.md) for
+adoption and the [schema 10 signal guide](docs/task-signals.md) for legacy behavior.
 
 ## Documentation
 
@@ -230,15 +249,18 @@ all deployed readers/writers are updated and existing runs have drained.
 | Task setup, execution, and configuration | [Runtime guide](docs/task-runtime.md) |
 | Task boundaries, interfaces and the execution entrypoint | [Execution guide](docs/task-execution.md) |
 | Messages and worker integration | [Task I/O](docs/task-io.md) |
+| Main inboxes, atomic finish and signal contracts | [Main inbox protocol](docs/task-main-inbox.md) |
 | Git transports and deployment checks | [Adapters](docs/task-runtime-adapters.md), [deployment](docs/task-runtime-deployment.md) |
 | Recovery resources and cleanup | [Reports](docs/task-runtime-reports.md), [cleanup](docs/task-runtime-cleanup.md) |
 | Interface changes and migration decisions | [Runtime 2.11 decisions](docs/task-runtime-slim.md) |
 | Development, tests, and coverage | [Contributing](CONTRIBUTING.md) |
 | Vulnerability reporting | [Security policy](SECURITY.md) |
 
-For existing installations, check the [upgrade requirements](docs/task-io.md#run-streams)
-before changing runtime versions. Runtime 2.11 upgrades to schema 9 only after
-all existing runs have drained; update readers and writers together.
+For existing installations, follow the [schema 11 migration procedure](docs/task-main-inbox.md#migration-and-host-integration).
+Deploy runtime 2.14 to every writer, drain/reconcile runs and legacy inbox writers,
+then explicitly run `io migrate --confirm-writers-drained`. `init` and normal
+admission do not automatically enable schema 11; legacy storage remains in use
+until migration.
 
 ## License
 

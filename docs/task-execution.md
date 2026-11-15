@@ -1,13 +1,13 @@
 > Runtime 2.14 adds [schema 11 main inboxes](task-main-inbox.md), output ID
-> contracts and atomic finish/fanout. The v1 interface and legacy storage details
-> below remain supported for migration; `execute` now accepts one task only.
+> contracts and atomic finish/fanout. Schema 11 requires explicit migration;
+> version 1 interfaces and schema 9/10 storage remain supported until adoption.
 
 # Task interfaces and caller execution
 
-Runtime 2.13 adds one caller entrypoint, `execute`, for readiness checks, admission,
-workspace preparation, worker supervision, verified finish and optional task
-continuation. Existing lifecycle primitives remain public for integrations that
-own those steps individually. The entrypoint does not choose an LLM provider,
+`execute` provides readiness checks, admission, workspace preparation, worker
+supervision and verified finish for one task per invocation. The caller invokes
+each subsequent task independently. Existing lifecycle primitives remain public
+for integrations that own those steps individually. The entrypoint does not choose an LLM provider,
 detect a hosting service, dispatch Actions, or change schedules.
 
 ## Responsibilities
@@ -18,7 +18,7 @@ shows the caller/session boundary alongside shared Git branches and task data.
 | Owner | Responsibilities |
 | --- | --- |
 | Task | Declare handled inbox kinds, read/written signal types, required business capabilities and readiness; own task-specific prompts and preferred model/effort; process inputs; save owned outputs and signals; verify results before acknowledging captured requests. |
-| Caller | Choose an explicit task allowlist, executor capabilities, credentials, host, startup triggers, continuation permission and bound; apply task preferences to actual model/effort settings. |
+| Caller | Choose the task for each execution, executor capabilities, credentials, host and startup triggers; apply task preferences to actual model/effort settings and independently invoke subsequent tasks. |
 | task-inbox | Durable messages and signal synchronization, fixed-snapshot readiness, run admission, ownership, heartbeat, execution claims, finish, recovery and a final pending-work check. |
 | Installed adapter | Translate the portable execution context into a script/agent invocation; evaluate application conditions if requested; verify business outcomes and return bound evidence. |
 
@@ -37,6 +37,9 @@ completion hook violates this boundary.
 Pass a JSON file to `task add --interface-file FILE` or
 `task edit --id TASK --expected-revision N --interface-file FILE`. The declaration
 is persisted as `task.json.interface`; edits use the existing revision check.
+For schema 11, use [version 2 output declarations](task-main-inbox.md#declared-signals)
+to enforce signal IDs, types and required outputs. This version 1 example remains
+compatible and describes output types without enforcing an output contract:
 
 ```json
 {
@@ -84,8 +87,9 @@ Global options precede `execute`. Execution accepts exactly one `--task`; a read
 read-only plan with the authority commit, eligibility/reason, handled and ignored
 pending message IDs, and current signal references (path, revision, status,
 SHA-256 and commit). Each plan uses one main snapshot for task definitions,
-receipts and signal data; inboxes are append-only separately read streams.
-A notice ahead of that snapshot requires a retry. `--check` does not run signal
+receipts, signal data and, under schema 11, inbox messages. Legacy inboxes are
+separately read append-only streams; a notice ahead of the authority snapshot
+requires a retry. `--check` does not run signal
 sync, write shared refs, admit a run or start a worker. A condition adapter is trusted
 to be read-only.
 
@@ -139,7 +143,7 @@ Before exiting zero, atomically write `result_path`:
 }
 ```
 
-`outcome` may also be `failed` or `cancelled`; those stop continuation. Optional
+`outcome` may also be `failed` or `cancelled`. Optional
 `completion` supplies the existing business completion receipt when applicable.
 The caller can pass `--completion-contracts-file FILE`, a JSON map from allowed
 task IDs to existing business completion contracts. These are pinned at admission
@@ -173,7 +177,7 @@ assessment or select a publication target. Producers only save their own facts.
 Reuse the same global operation ID for an interrupted invocation. Begin and
 selection decisions use ordinary immutable authority operation receipts, without
 an additional dispatch queue or claim database. The begin receipt binds the task
-allowlist, runner, continuation options and adapter file hashes. Changing an
+selection, runner and adapter file hashes. Changing an
 adapter or policy requires reconciling that invocation before using a new one.
 Selection gives each step deterministic admission and finish operation IDs.
 
@@ -232,7 +236,8 @@ Put task-specific executables in task directories rather than adding root `bin`
 wrappers. Generic profile validation and fixed-commit prompt loading are candidates
 for a future `execute` context contract; keep them in the trusted application
 adapter until that contract is implemented. Readiness, admission, supervision,
-durable launch claims and bounded continuation already belong to this tool.
+and durable launch claims belong to this tool. Subsequent task invocations
+belong to the caller.
 
 A Codex scheduled invocation and a local Codex session are caller integrations.
 Keep their entry prompt short and version the canonical caller procedure in the
@@ -244,7 +249,7 @@ Do not reset a user's primary checkout to bootstrap a scheduled run.
 
 | Prompt | Contents | Lifecycle owner |
 | --- | --- | --- |
-| Caller/bootstrap prompt | Repository, allowed task IDs, canonical caller-procedure reference, how to resume the original invocation, and the authorized continuation policy | Caller provisions capabilities, applies task model preferences, chooses tools and placement, and enters the runtime |
+| Caller/bootstrap prompt | Repository, allowed task IDs, canonical caller-procedure reference, how to resume the original invocation, and policy for subsequent invocations | Caller provisions capabilities, applies task model preferences, chooses tools and placement, and enters the runtime once per task |
 | Task/worker prompt | Admitted context, task instructions from its pinned workspace, owned inputs/outputs and required completion evidence | Existing admitted run; no second admission or subscriber startup |
 
 Do not copy business steps, eligibility rules or recovery logic into every
@@ -260,8 +265,9 @@ Act as caller for <task-data repository>, with allowed task IDs <allowlist>.
 Preserve unfinished work and the original invocation/operation IDs. Fetch and
 pin main in a clean control checkout, then read <canonical caller procedure>
 and its policy at that commit. Use the adopted task-inbox entrypoint and the
-installed executor profile. Continue only if that policy explicitly permits it,
-within its task allowlist and bound. Reconcile unknown outcomes before new work.
+installed executor profile. Invoke exactly one task per execute call. Use the
+returned pending-work plan for further calls only within caller policy.
+Reconcile unknown outcomes before new work.
 ```
 
 An executor using `execute` can assemble this **worker prompt** from its context:
@@ -320,8 +326,9 @@ This example assumes a self-hosted runner with an adopted, immutable tool and
 executor already installed at the illustrative `/opt` paths. It operates on the
 workflow repository as its task-data repository and an inbox-driven `report`
 task. Install this workflow on main (the repository's default branch).
-Inbox-only producers must send the explicit dispatch described below. This is a
-documentation example, not a workflow installed by task-inbox.
+For schema 11, inbox delivery writes main; token-authenticated writes need the
+startup integration described below. Legacy inbox-branch producers need an
+explicit startup hint. This example workflow must be installed by the caller.
 
 ```yaml
 name: Process task inbox
@@ -376,14 +383,16 @@ slot or recover an unknown launch just because its old runner vanished.
 The workflow integration must inspect the returned `pending_tasks`/`next` plan,
 and check configured consumers outside its execution allowlist when routing
 other tasks. Notifications saved by `signal sync` do not start Actions by
-themselves. A normal authenticated push to main can trigger the `push` entry.
-An inbox-only push needs another startup path even with ordinary Git credentials:
-GitHub evaluates a push workflow from the pushed ref, and a newly created
-task-inbox inbox branch contains data, not a workflow. Merely adding that branch
-to a workflow's main-branch YAML does not install the workflow on the inbox ref.
+themselves. Under schema 11, requests and finish notifications are main commits;
+a GitHub App token/PAT push can trigger the example's main-branch workflow.
+Before migration, an inbox-branch push needs another startup path even with
+ordinary Git credentials: GitHub evaluates a push workflow from the pushed ref,
+and a legacy inbox branch contains data, not a workflow. Adding that branch to
+main's workflow YAML does not install the workflow on the inbox ref.
 
-This example uses explicit authenticated `repository_dispatch` hints for
-inbox-only delivery, for both ordinary Git credentials and `GITHUB_TOKEN`.
+Use explicit authenticated `repository_dispatch` hints when push cannot trigger
+the consumer, including legacy inbox-branch delivery and standard
+`GITHUB_TOKEN` writes to main.
 The caller first confirms `io send`/`signal sync` delivery and the configured
 consumer's readiness, then dispatches to the workflow on the default branch.
 Pushes made with `GITHUB_TOKEN` do not recursively trigger push workflows, so
@@ -411,12 +420,13 @@ recovery procedure. See [retry and recovery](#retry-and-recovery).
 
 ## Migration and further consolidation
 
-This is additive to schema-2 task definitions and schema-9/10 repositories; there
-is no new authority or signal wire schema and no automatic enablement or schedule
-change. Older task editors preserve the optional interface field. Roll out the
-2.13 tool/installed adapters to participating callers before selecting the new
-entrypoint. Register declarations with revision checks, initially use `--check`,
-then opt individual callers into execution and, separately, bounded continuation.
+The entrypoint works with schema-2 task definitions and schema-9/10 repositories;
+using it does not automatically migrate storage or change schedules. Deploy the
+current tool and installed adapters together. Register declarations with revision
+checks, initially use `--check`, then opt individual callers into single-task
+execution. Remove older `--continue`/`--max-tasks` flags; the caller now invokes
+each subsequent task independently. Adopt schema 11 using the separate
+[writer-drain and inbox migration procedure](task-main-inbox.md#migration-and-host-integration).
 Keep legacy admission/finish paths available for already-running tasks. Do not
 invoke the new entrypoint for an already-admitted run.
 
@@ -432,7 +442,7 @@ After adopting this entrypoint, audit custom integrations in this order:
 | --- | --- | --- |
 | Candidate planner | This entrypoint's open/slot/inbox checks and fixed-signal plan | Business ranking in a condition adapter |
 | Local launch claim | Shared operation intent plus existing durable execution claim | Verified host startup and stop adapter |
-| Hand-written task chains | Ordered allowlist, explicit continuation and bound, per-task ownership | Deployment-specific profiles and deferred-task policy |
+| Hand-written task chains | Single-task execution, returned pending-work plan and per-task ownership | Subsequent invocations, deployment profiles and deferred-task policy |
 | Worker bootstrap | Common prepare/supervise/finish/recheck | Agent provider, credentials and capability provisioning |
 | Signal-notice drain loop | Potential future fixed-snapshot/coalescing helper | Business transformation, durable output verification and captured-revision acknowledgement |
 | Publication acceptance/restart | Existing completion and I/O receipt primitives | External receiver identity, access policy and publication deduplication |

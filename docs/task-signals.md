@@ -3,7 +3,11 @@
 > fixed notification values and atomic finish/fanout. The schema 10 behavior
 > documented below remains available until explicit migration.
 
-# Task-owned signals
+# Task-owned signals (legacy schema 10)
+
+This guide describes the pre-migration protocol. For current schema 11 behavior,
+including successful-finish-only delivery and frozen notification values, use
+the [main inbox and signal protocol](task-main-inbox.md).
 
 Tasks declare read and written types in their [portable interface](task-execution.md#declaration).
 Declarations do not identify output consumers or choose a startup host. Caller

@@ -86,8 +86,9 @@ current remote refs/SHAs, current-clone workspaces, local branches and tracking
 refs, sidecar paths, and the last local cleanup notice. Ref and filesystem reads
 are separate observations and can race with ongoing cleanup. Running runs and
 ordinary terminal runs with confirmed workspace collection in this clone are
-omitted. Permanent inbox branches are
-not leftovers. Unattributed run refs appear separately in repository/task scope.
+omitted. Legacy inbox branches are not leftovers: schema 11 migration preserves
+them while new delivery uses main. Unattributed run refs appear separately in
+repository/task scope.
 A run filter requires a task filter.
 
 The report reads metadata without renewing leases, acquiring slots, releasing
