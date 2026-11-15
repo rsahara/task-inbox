@@ -11,7 +11,7 @@ from .store import (CONTROL, Snapshot, TaskError, atomic_json, digest, encode, g
                     git_support, identity, now, refs_overlap)
 
 
-def execute(store, task_id, run_id, command):
+def execute(store, task_id, run_id, command, *, worker_finish=False):
     """Heartbeats run in the supervisor, independently of a long child command.
 
     The supervisor never auto-restarts the child after losing its own process.
@@ -76,7 +76,16 @@ def execute(store, task_id, run_id, command):
                         if time.monotonic() >= next_beat:
                             # Fail closed on an unconfirmed heartbeat or revoked
                             # grant. A new attempt gets a new run, never this ID.
-                            runtime.heartbeat(store, task_id, run_id, progress="running")
+                            try:
+                                runtime.heartbeat(store, task_id, run_id, progress="running")
+                            except TaskError:
+                                if not worker_finish:
+                                    raise
+                                current = runtime.load_run(store.snapshot(), task_id, run_id)[2]
+                                if current['status'] != 'succeeded' or current['generation'] != run['generation']:
+                                    raise
+                                from . import completion
+                                completion.require_terminal(current, 'succeeded')
                             next_beat = time.monotonic() + run["execution"]["heartbeat_seconds"]
                     for key in list(selector.get_map().values()):
                         while True:

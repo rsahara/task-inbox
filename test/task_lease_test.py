@@ -8,7 +8,7 @@ import unittest
 from unittest.mock import Mock, patch
 
 import task_runtime_test as base
-from task_runtime import cli, leases, lifecycle, maintenance, runtime
+from task_runtime import cli, leases, lifecycle, main_io, maintenance, runtime, task_io
 from task_runtime.store import CONTROL, Snapshot, Store, TaskError, digest
 from task_runtime.transport import TransportError
 
@@ -178,6 +178,34 @@ class LeaseValidationTest(unittest.TestCase):
 
 
 class LeaseTests(LeaseCase):
+    def test_main_inbox_emit_rechecks_expiry_after_initial_ownership_check(self):
+        self.enable()
+        main_io.migrate(self.c.sa, 'main-inbox', drained=True)
+        self.c.start()
+        before = self.c.sa.fetch()
+        check = runtime.check
+        def expire_after_check(*args, **kwargs):
+            run = check(*args, **kwargs)
+            self.settings(now_ms=1300001)
+            return run
+        with patch.object(runtime, 'check', side_effect=expire_after_check):
+            with self.assertRaisesRegex(TaskError, 'Lease expired'):
+                task_io.emit(self.c.sa, 'expired-intent', 't', 'r', 'intent', 'external-intent', {})
+        self.assertEqual(self.c.sa.fetch(), before)
+        self.assertIsNone(self.c.sa.snapshot().read('tasks/t/runs/r/io/events/intent.json'))
+
+    def test_main_inbox_emit_is_lease_fenced_at_server_cas(self):
+        self.enable()
+        main_io.migrate(self.c.sa, 'main-inbox', drained=True)
+        self.c.start()
+        task_io.emit(self.c.sa, 'accepted-intent', 't', 'r', 'accepted', 'external-intent', {})
+        before = self.c.sa.fetch()
+        self.settings(advance_on_cas_ms=300001)
+        with self.assertRaisesRegex(TransportError, 'lease_guard_rejected'):
+            task_io.emit(self.c.sa, 'delayed-intent', 't', 'r', 'delayed', 'external-intent', {})
+        self.assertEqual(self.c.sa.fetch(), before)
+        self.assertIsNone(self.c.sa.snapshot().read('tasks/t/runs/r/io/events/delayed.json'))
+
     def test_metadata_retirement_accepts_migration_to_a_noncolliding_io_prefix(self):
         store = Store(self.c.a, branch='task-io', transport_adapter=str(self.adapter))
         runtime.initialize(store, 'other-authority')

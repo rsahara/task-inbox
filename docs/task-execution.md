@@ -1,3 +1,7 @@
+> Runtime 2.14 adds [schema 11 main inboxes](task-main-inbox.md), output ID
+> contracts and atomic finish/fanout. The v1 interface and legacy storage details
+> below remain supported for migration; `execute` now accepts one task only.
+
 # Task interfaces and caller execution
 
 Runtime 2.13 adds one caller entrypoint, `execute`, for readiness checks, admission,
@@ -72,12 +76,11 @@ No command in a task definition, signal or inbox is automatically executed.
 ```sh
 task-inbox --repo /path/to/task-data execute --task collect --task report --check
 task-inbox --repo /path/to/task-data --operation-id invocation-42 execute \
-  --task collect --task report --runner caller-1 --executor /opt/task-executor \
-  --continue --max-tasks 4
+  --task collect --runner caller-1 --executor /opt/task-executor
 ```
 
-Global options precede `execute`. Repeat `--task` to supply an ordered, unique
-allowlist. No undeclared task is discovered for execution. `--check` returns a
+Global options precede `execute`. Execution accepts exactly one `--task`; a read-only
+`--check` may inspect an ordered list. No undeclared task is discovered for execution. `--check` returns a
 read-only plan with the authority commit, eligibility/reason, handled and ignored
 pending message IDs, and current signal references (path, revision, status,
 SHA-256 and commit). Each plan uses one main snapshot for task definitions,
@@ -97,13 +100,10 @@ authoritative definition. Workers inspect their actual
 current inputs before effects. Readiness is a scheduling hint, never a claim on
 inbox messages or an authorization to reuse another run's completion evidence.
 
-By default only one task is admitted. `--continue` permits the next eligible task
-after a verified success; the default bound is 16 admissions, with `--max-tasks`
-allowing 1–100. Every task has a separate run, workspace, heartbeat, execution
-claim and completion. Manual/condition tasks execute at most once per invocation;
-inbox tasks may run again for late arrivals, within the same bound. The caller
-can use the returned `next` plan and `pending_tasks` to choose a later trigger or
-existing schedule instead. The first task does not choose that transport.
+Each invocation admits at most one task. Continuation flags have been removed.
+The caller can use the returned `next` plan and `pending_tasks` to choose a later
+trigger or schedule. Each task has its own run, workspace, heartbeat, execution
+claim and completion. Delivery never starts downstream work.
 
 The entrypoint rechecks pending inputs after releasing the last slot. Requests
 arriving after that read stay durable for the next caller invocation. A scheduler
@@ -362,8 +362,7 @@ jobs:
             > "$RUNNER_TEMP/task-inbox-result.json"
 ```
 
-For authorized chaining, repeat `--task` with the caller's allowed targets and
-add `--continue --max-tasks N`; the default above admits at most one task.
+For chaining, the caller independently invokes each subsequent task after an inbox update.
 Supply condition adapters and business completion contracts when the selected
 tasks require them. GitHub concurrency only reduces competing workflow runs;
 runtime slots and execution claims still govern local, Cloud and Actions callers.

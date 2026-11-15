@@ -77,6 +77,12 @@ def read_value(snapshot, name):
 
 
 def put(store, task_id, run_id, value):
+    state = runtime.local_state(store, task_id, run_id)
+    with store.lock(state.with_suffix('.lock')):
+        return _put(store, task_id, run_id, value)
+
+
+def _put(store, task_id, run_id, value):
     value = validate(value, task_id)
     snapshot = store.snapshot()
     require_enabled(snapshot)
@@ -88,15 +94,31 @@ def put(store, task_id, run_id, value):
     if not local.get('prepared') or local.get('generation') != run['generation']:
         raise TaskError('Prepare the run before updating signals')
     work = Path(local['path'])
+    from . import main_io, interfaces
+    ancestor = run['definition_commit'] if main_io.enabled(snapshot) else run['source_head']
     if (work.is_symlink() or not work.is_dir() or
             git(work, 'rev-parse', '--show-toplevel') != str(work.resolve()) or
-            not git(work, 'merge-base', '--is-ancestor', run['source_head'], 'HEAD', predicate=True)):
+            not git(work, 'merge-base', '--is-ancestor', ancestor, 'HEAD', predicate=True)):
         raise TaskError('Prepared workspace is missing or changed')
     relative = runtime.data_prefix(run, task_id) + 'signals/' + value['id'] + '.json'
     previous = catalog(snapshot, task_id).get(value['id'])
     if previous and previous['path'] != relative:
         relative = previous['path']
     old = previous['value'] if previous else None
+    prior_confirmation = local.get('confirmed_signals', {}).get(value['id'])
+    if main_io.enabled(snapshot):
+        from .store import Snapshot
+        definition = Snapshot(store, run['definition_commit'])
+        task = runtime.load_task(definition, task_id)[0]
+        contract = interfaces.output(task, value)
+        if contract and contract.get('value_schema'):
+            from .signal_contracts import validate_value
+            schema = definition.json(runtime.root(task_id, definition) + '/' + contract['value_schema'])
+            validate_value(value.get('value', value.get('payload')), schema)
+        value = copy.deepcopy(old if old and logical(old) == logical(value) else value)
+        value['revision'] = (old['revision'] if old and logical(old) == logical(value)
+                             else (old or {}).get('revision', 0) + 1)
+        local.setdefault('confirmed_signals', {})[value['id']] = digest(value)
     if old and old != value and value['revision'] <= old['revision']:
         raise TaskError('Changed signal requires a newer revision')
     if old is None and value['revision'] != 1:
@@ -105,25 +127,75 @@ def put(store, task_id, run_id, value):
     if target.is_symlink() or any(p.is_symlink() for p in target.parents if work in p.parents or p == work):
         raise TaskError('Signal path cannot follow symlinks')
     if target.exists() and target.read_bytes() not in (snapshot.read(relative), encode(value)):
-        raise TaskError('Preserve unpublished signal changes before replacing them')
+        own_confirmation = (main_io.enabled(snapshot) and prior_confirmation
+                            and digest(json.loads(target.read_text())) == prior_confirmation)
+        if not own_confirmation:
+            raise TaskError('Preserve unpublished signal changes before replacing them')
     atomic_json(target, value)
+    if main_io.enabled(snapshot):
+        atomic_json(state, local)
     return {'path': relative, 'publication': 'pending'}
 
 
-def subscribe(store, operation_id, task_id, consumer):
+def subscription(snapshot, task_id, consumer, *, signal_id=None, on='change', initial='next'):
+    require_enabled(snapshot)
+    runtime.load_task(snapshot, task_id); runtime.load_task(snapshot, consumer)
+    if task_id == consumer:
+        raise TaskError('A task cannot subscribe to its own signals')
+    item = dict(task_id=task_id, consumer=consumer)
+    if signal_id is None:
+        if on != 'change' or initial != 'next':
+            raise TaskError('Delivery conditions require a declared signal ID')
+        return item
+    from . import main_io, interfaces
+    identity(signal_id, 'signal ID')
+    if not main_io.enabled(snapshot):
+        raise TaskError('Migrate main inbox storage before adding signal-level subscriptions')
+    if on not in ('change', 'run') or initial not in ('next', 'current') or (on == 'run' and initial != 'next'):
+        raise TaskError('Invalid signal delivery condition')
+    declared = interfaces.declaration(runtime.load_task(snapshot, task_id)[0])
+    if declared['schema_version'] != 2:
+        raise TaskError('Signal subscriptions require declared output IDs')
+    matches = [s for s in declared['signals']['writes'] if s['id'] == signal_id]
+    if len(matches) != 1:
+        raise TaskError('Subscribe to an exact declared output ID')
+    item.update(signal_id=signal_id, on=on, initial=initial)
+    item['id'] = 'subscription-' + digest(item)[:40]
+    current = catalog(snapshot, task_id).get(signal_id)
+    item['after_revision'] = current['value']['revision'] if current and initial == 'next' else 0
+    return item
+
+
+def subscribe(store, operation_id, task_id, consumer, *, signal_id=None, on='change', initial='next'):
     def apply(snapshot):
-        require_enabled(snapshot)
-        runtime.load_task(snapshot, task_id); runtime.load_task(snapshot, consumer)
-        if task_id == consumer:
-            raise TaskError('A task cannot subscribe to its own signals')
+        item = subscription(snapshot, task_id, consumer, signal_id=signal_id, on=on, initial=initial)
         config = snapshot.json(SUBSCRIPTIONS, {'schema_version':1, 'subscriptions':[]})
-        item = dict(task_id=task_id, consumer=consumer)
+        existing = next((s for s in config['subscriptions'] if s.get('id') == item.get('id')), None) if 'id' in item else None
+        if existing is not None:
+            return {}, existing
         if item not in config['subscriptions']:
             config = copy.deepcopy(config)
             config['subscriptions'].append(item)
         return {SUBSCRIPTIONS: encode(config)}, item
-    return store.transact(operation_id, dict(kind='signal-subscribe', task_id=task_id,
-                          consumer=consumer), apply)
+    request = dict(kind='signal-subscribe', task_id=task_id, consumer=consumer)
+    if signal_id is not None:
+        request.update(signal_id=signal_id, on=on, initial=initial)
+    return store.transact(operation_id, request, apply)
+
+
+def confirmed_value(store, task_id, run_id, signal_id):
+    """Read an owned local confirmation before atomic successful publication."""
+    identity(signal_id, 'signal ID')
+    run = runtime.check(store, task_id, run_id)
+    state = json.loads(runtime.local_state(store, task_id, run_id).read_text())
+    if not state.get('prepared') or state['generation'] != run['generation']:
+        raise TaskError('Prepare the run before reading confirmed signals')
+    previous = catalog(store.snapshot(), task_id).get(signal_id)
+    relative = previous['path'] if previous else runtime.data_prefix(run, task_id) + 'signals/' + signal_id + '.json'
+    value = validate(json.loads((Path(state['path']) / relative).read_text()), task_id)
+    if state.get('confirmed_signals', {}).get(signal_id) != digest(value):
+        raise TaskError('Signal is not confirmed by this run')
+    return value
 
 
 def publication(snapshot, run, source, touched, operation_id):
@@ -155,6 +227,18 @@ def sync(store, *, task_id=None, participant=None):
     """Catch up to current main using inbox messages as the only delivery record."""
     from . import task_io
     snapshot = store.snapshot()
+    from . import main_io
+    if main_io.enabled(snapshot):
+        preview, count = delivery_changes(snapshot, task_id=task_id, participant=participant)
+        if not preview:
+            return dict(required=False, delivered=0, blocked=[], needs_attention=False)
+        def apply(current):
+            changes, count = delivery_changes(current, task_id=task_id, participant=participant)
+            return changes, dict(required=bool(count), delivered=count, blocked=[], needs_attention=False)
+        # The request binds the snapshot and source filter; replay never invents a delivery.
+        operation = 'signal-sync-' + digest([snapshot.commit, task_id, participant])[:48]
+        return store.transact(operation, dict(kind='signal-sync', task_id=task_id, participant=participant,
+                                              observed=snapshot.commit), apply)
     if not enabled(snapshot):
         return dict(required=False, delivered=0, blocked=[], needs_attention=False)
     subscriptions = snapshot.json(SUBSCRIPTIONS, {'subscriptions': []})['subscriptions']
@@ -203,9 +287,29 @@ def require_delivery(result):
     return result
 
 
-def read_notice(store, message):
-    """A notice is a hint: consumers evaluate current main, not historical events."""
+def read_notice(store, message, *, snapshot=None):
+    """Read fixed v2 evidence, or resolve a legacy hint against the given main."""
+    snapshot = snapshot or store.snapshot()
     value = message.get('payload', {})
+    if message.get('kind') != KIND or not isinstance(value, dict):
+        raise TaskError('Invalid signal notification')
+    if value.get('schema_version') == 2:
+        identity(value.get('task_id'), 'source task ID')
+        identity(value.get('signal_id'), 'signal ID')
+        identity(value.get('subscription_id'), 'subscription ID')
+        if value.get('trigger') == 'run':
+            identity(value.get('run_id'), 'source run ID')
+        elif value.get('trigger') != 'change' or value.get('run_id') is not None:
+            raise TaskError('Invalid signal notification trigger')
+        signal = validate(value.get('signal'), value.get('task_id'))
+        if (signal['id'] != value.get('signal_id') or signal['revision'] != value.get('revision')
+                or value.get('trigger') not in ('change', 'run')
+                or message.get('id') != notice_id(value)):
+            raise TaskError('Invalid fixed signal notification')
+        # The embedded value is the evidence. A latest-main source path could
+        # already contain a newer revision and must not be paired with this hash.
+        return dict(value, commit=snapshot.commit, sha256=digest(signal),
+                    type=signal['type'], status=signal['status'])
     if message.get('kind') != KIND or value.get('schema_version') != 1:
         raise TaskError('Invalid signal notification')
     task_id = identity(value.get('task_id'), 'source task ID')
@@ -213,9 +317,98 @@ def read_notice(store, message):
     revision = value.get('revision')
     if type(revision) is not int or revision < 1 or message.get('id') != message_id(task_id, signal_id, revision):
         raise TaskError('Invalid signal notification identity')
-    snapshot = store.snapshot()
     record = catalog(snapshot, task_id).get(signal_id)
     if not record or record['value']['revision'] < revision:
         raise TaskError('Signal notification is ahead of current main')
     return dict(value, commit=snapshot.commit, path=record['path'], sha256=record['sha256'],
                 type=record['value']['type'], status=record['value']['status'])
+
+
+def logical(value):
+    """A value field owns its meaningful timestamps; envelope times are observations."""
+    ignored = {'revision', 'observed_at', 'generated_at', 'emitted_at', 'run_id'}
+    return {k: v for k, v in value.items() if k not in ignored}
+
+
+def notice_id(payload):
+    key = [payload['task_id'], payload['signal_id'], payload['subscription_id'], payload['trigger']]
+    key.append(payload['run_id'] if payload['trigger'] == 'run' else payload['revision'])
+    return 'signal-' + digest(key)[:64]
+
+
+def delivery_changes(snapshot, *, task_id=None, participant=None, run=None, confirmed=()):
+    """Append all selected inbox messages inside the producer's main transaction."""
+    from . import main_io
+    config = snapshot.json(SUBSCRIPTIONS, {'subscriptions': []})
+    changes, count = {}, 0
+    for route in config['subscriptions']:
+        owner, consumer = route['task_id'], route['consumer']
+        if task_id is not None and task_id != owner:
+            continue
+        if participant is not None and participant not in (owner, consumer):
+            continue
+        trigger = route.get('on', 'change')
+        if trigger == 'run' and run is None:
+            continue  # Run events are never inferred from the latest state.
+        for record in catalog(snapshot, owner).values():
+            value = record['value']
+            if route.get('signal_id') is not None and route['signal_id'] != value['id']:
+                continue
+            if trigger == 'run' and value['id'] not in confirmed:
+                continue
+            if trigger == 'change' and value['revision'] <= route.get('after_revision', 0):
+                continue
+            if 'id' in route:
+                payload = dict(schema_version=2, task_id=owner, signal_id=value['id'],
+                    revision=value['revision'], subscription_id=route['id'], trigger=trigger,
+                    run_id=run['run_id'] if run else None, signal=value)
+                # change identity/content must not depend on which run synchronized it.
+                if trigger == 'change':
+                    payload['run_id'] = None
+                mid = notice_id(payload)
+            else:
+                payload = dict(schema_version=1, task_id=owner, signal_id=value['id'], revision=value['revision'])
+                mid = message_id(owner, value['id'], value['revision'])
+            message = dict(schema_version=1, id=mid, kind=KIND, payload=payload)
+            added = main_io.append(snapshot, consumer, message, changes)
+            changes.update(added); count += bool(added)
+    return changes, count
+
+
+def finish_changes(store, snapshot, source, run, outcome, changes, local):
+    """Validate required outputs and atomically publish only successful signals."""
+    from . import interfaces
+    from .store import Snapshot
+    definition = Snapshot(store, run['definition_commit'])
+    task = runtime.load_task(definition, run['task_id'])[0]
+    interface = interfaces.declaration(task)
+    prefix = path(snapshot, run['task_id'])
+    confirmed = local.get('confirmed_signals', {})
+    if outcome != 'succeeded':
+        for name in list(changes):
+            if name.startswith(prefix):
+                del changes[name]
+        return {}, 0
+    values = catalog(source, run['task_id'])
+    if interface['schema_version'] == 2:
+        for output in interface['signals']['writes']:
+            if output.get('required') and output['id'] not in confirmed:
+                raise TaskError('Required output signal was not confirmed by this run')
+    for sid, fingerprint in confirmed.items():
+        value = values.get(sid, {}).get('value')
+        if value is None or digest(value) != fingerprint:
+            raise TaskError('Confirmed signal changed after submission')
+        interfaces.output(task, value)
+    for name in changes:
+        if name.startswith(prefix):
+            value = source.json(name)
+            if value is not None and value['id'] not in confirmed:
+                raise TaskError('Publish signals through signal put to confirm this run')
+    projected = Snapshot(store, snapshot.commit)
+    projected.entries = dict(snapshot.entries)
+    for name, entry in changes.items():
+        if entry is None:
+            projected.entries.pop(name, None)
+        else:
+            projected.entries[name] = entry if isinstance(entry, tuple) else store.blob(entry)
+    return delivery_changes(projected, task_id=run['task_id'], run=run, confirmed=confirmed)

@@ -20,7 +20,7 @@ def finish_record(run, operation_id, preparation, discard):
                 "source_head": run["source_head"], "has_checkpoint": preparation["has_checkpoint"]}
     else:
         record.update(preparation["cleanup"])
-        record["work_head"] = run["source_head"]
+        record["work_head"] = preparation["cleanup"].get("work_head") if run.get("main_inbox_protocol") else run["source_head"]
     return record
 
 
@@ -49,7 +49,7 @@ def terminal(store, snapshot, task_id, run_id):
     if (run["work_ref"] != prefix + "/work" or run["heartbeat_ref"] != heartbeat_ref or
             any(refs_overlap(ref, store.ref) for ref in (run["work_ref"], run["heartbeat_ref"]))):
         raise TaskError("Cleanup ref is outside the original run namespace")
-    if record.get("work_head") != run["source_head"]:
+    if not run.get("main_inbox_protocol") and record.get("work_head") != run["source_head"]:
         raise TaskError("Cleanup source differs from the accepted source")
     return run, record
 
@@ -158,6 +158,10 @@ def collect_local(store, run):
         if marker.exists() and json.loads(marker.read_text()).get("phase") not in ("exited", "interrupted"):
             raise TaskError("Worker termination is unconfirmed; retain local files")
         if state['mode'] != 'worktree':
+            if run.get('main_inbox_protocol'):
+                from . import main_io
+                preserve_work_history(store, run)
+                main_io.clear_snapshot_pin(store, run)
             remove_local_records(state_path)
             return 'executor_owned'
         work = Path(state["path"])
@@ -173,27 +177,64 @@ def collect_local(store, run):
             common = (work / git(work, "rev-parse", "--git-common-dir")).resolve()
             if common != store.common or git(work, "symbolic-ref", "HEAD") != run["work_ref"]:
                 raise TaskError("Workspace repository or branch changed")
-            if git(work, "rev-parse", "HEAD") != run["source_head"]:
+            expected_head = run.get('workspace_head') if run.get('main_inbox_protocol') else run['source_head']
+            if git(work, "rev-parse", "HEAD") != expected_head:
                 raise TaskError("Workspace contains unpreserved commits")
-            if (git(work, "status", "--porcelain", "--untracked-files=all") or
+            if run.get('main_inbox_protocol'):
+                from . import main_io
+                main_io.verify_saved_workspace(store, run, work)
+            elif (git(work, "status", "--porcelain", "--untracked-files=all") or
                     git(work, "ls-files", "--others", "--ignored", "--exclude-standard")):
                 raise TaskError("Workspace contains unpreserved files")
-            source = Snapshot(store, run["source_head"])
+            source = None if run.get('main_inbox_protocol') else Snapshot(store, run["source_head"])
             for path, entry in run["artifact_manifest"].items():
-                if source.entries.get(path) != (tuple(entry) if entry else None):
+                if not run.get('main_inbox_protocol') and source.entries.get(path) != (tuple(entry) if entry else None):
                     raise TaskError("Workspace does not match the accepted output")
-            git(store.repo, "worktree", "remove", str(work))
+            if run.get('main_inbox_protocol'):
+                preserve_work_history(store, run)
+            git(store.repo, "worktree", "remove", *(["--force"] if run.get("main_inbox_protocol") else []), str(work))
         elif registered:
             # A missing registered directory may be a disconnected mount.
             raise TaskError("Workspace is missing but still registered; retained")
         if git(store.repo, "show-ref", "--verify", "--quiet", run["work_ref"], predicate=True):
-            if git(store.repo, "rev-parse", run["work_ref"]) != run["source_head"]:
+            expected_head = run.get('workspace_head') if run.get('main_inbox_protocol') else run['source_head']
+            if git(store.repo, "rev-parse", run["work_ref"]) != expected_head:
                 raise TaskError("Local work branch changed; retained")
             if "branch " + run["work_ref"] in git(store.repo, "worktree", "list", "--porcelain").splitlines():
                 raise TaskError("Local work branch is still checked out")
-            git(store.repo, "update-ref", "-d", run["work_ref"], run["source_head"])
+            if run.get('main_inbox_protocol'):
+                preserve_work_history(store, run)
+            git(store.repo, "update-ref", "-d", run["work_ref"], expected_head)
+        if run.get('main_inbox_protocol'):
+            from . import main_io
+            main_io.clear_snapshot_pin(store, run)
         remove_local_records(state_path)
         return "removed"
+
+
+def preserve_work_history(store, run):
+    """Keep explicit worker commits reachable before collecting their branch."""
+    head = run.get('workspace_head')
+    if not head or store.contains(run['definition_commit'], head):
+        return
+    ref = 'refs/tags/task-work-history/' + identity(run['task_id']) + '/' + identity(run['run_id'])
+    if git(store.repo, 'show-ref', '--verify', '--quiet', ref, predicate=True):
+        if git(store.repo, 'rev-parse', ref) != head:
+            raise TaskError('Local worker history ref changed; retain the workspace')
+    else:
+        git(store.repo, 'update-ref', ref, head, '0' * len(head))
+    state_path = runtime.local_state(store, run['task_id'], run['run_id'])
+    protected = json.loads(state_path.read_text()).get('preserved_files', {}) if state_path.exists() else {}
+    if protected and git(store.repo, 'log', '--format=', '--name-only', '--no-renames', '-m', '-z',
+                         run['definition_commit'] + '..' + head, '--',
+                         *(':(literal)' + p for p in protected)):
+        return  # Preserve mixed history locally without publishing protected work.
+    actual = store.remote_tip(ref)
+    if actual is None:
+        store.push(ref, head, None)
+        actual = store.remote_tip(ref)
+    if actual != head:
+        raise TaskError('Worker history preservation is unconfirmed; retain the workspace')
 
 
 def remove_local_records(state_path):
@@ -274,7 +315,7 @@ def _retire_metadata(store, task_id, run_id, *, apply):
         owned = {'task_id': task_id, 'run_id': run_id}
         paths = []
         for path in snapshot.entries:
-            if path in (prefix + '/run.json', prefix + '/result.json', prefix + '/cleanup.json') or path.startswith(prefix + '/io/'):
+            if path in (prefix + '/run.json', prefix + '/result.json', prefix + '/cleanup.json', prefix + '/source.json') or path.startswith((prefix + '/io/', prefix + '/source/')):
                 paths.append(path)
             elif path.startswith(CONTROL + '/operations/') and path.endswith('.json'):
                 receipt = snapshot.json(path)

@@ -9,8 +9,8 @@ Conversation may use the user's preferred language.
 
 Follow [docs/task-execution.md](docs/task-execution.md). Tasks declare handled
 inbox kinds and read/written signal types, and own their business outputs without
-depending on subscribers or execution hosts. Keep readiness mechanics and bounded
-continuation in the common entrypoint; keep application-specific eligibility in
+depending on subscribers or execution hosts. Keep readiness mechanics and single-task
+execution in the common entrypoint; keep application-specific eligibility in
 trusted adapters. Task-owned prompts and preferred model/effort belong with task
 definitions; callers apply them to actual workers. Host provisioning, credentials,
 triggers and schedules belong to caller integrations. Never launch a subscriber from a task's signal

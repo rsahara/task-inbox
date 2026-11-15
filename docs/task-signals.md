@@ -1,9 +1,13 @@
+> For schema 11, use the [main inbox and signal protocol](task-main-inbox.md).
+> It adds exact output declarations, `change`/`run` conditions, automatic revisions,
+> fixed notification values and atomic finish/fanout. The schema 10 behavior
+> documented below remains available until explicit migration.
+
 # Task-owned signals
 
 Tasks declare read and written types in their [portable interface](task-execution.md#declaration).
 Declarations do not identify output consumers or choose a startup host. Caller
-subscriptions route changes; `execute` checks readiness and optionally continues
-within its explicit allowlist. Signal sync itself never starts a consumer.
+subscriptions route changes; `execute` checks readiness for one task. Signal sync itself never starts a consumer.
 
 Signals are persistent task data, not a generic notification channel. Ordinary
 outputs remain in each task's data area and readers inspect them on main.

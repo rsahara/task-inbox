@@ -29,8 +29,6 @@ def parser():
     execute.add_argument('--executor', help='Absolute path of a trusted installed worker adapter')
     execute.add_argument('--condition-adapter', help='Absolute path of a trusted read-only readiness adapter')
     execute.add_argument('--completion-contracts-file', help='JSON map of allowed task IDs to business completion contracts')
-    execute.add_argument('--continue', dest='continue_tasks', action='store_true', help='Allow another eligible task after success')
-    execute.add_argument('--max-tasks', type=int, help='Bound all admissions, including a task with late inbox arrivals (default: 16 with --continue, otherwise 1)')
     execute.add_argument('--force', action='store_true', help='Explicitly run the first task once, including maintenance with no inbox work')
     signal = commands.add_parser('signal').add_subparsers(dest='action', required=True)
     signal.add_parser('enable', help='Enable schema 10 after all writers drain')
@@ -44,9 +42,15 @@ def parser():
             item.add_argument('--file', required=True)
         if name == 'subscribe':
             item.add_argument('--consumer', required=True)
+            item.add_argument('--signal-id')
+            item.add_argument('--on', choices=('change', 'run'), default='change')
+            item.add_argument('--initial', choices=('next', 'current'), default='next')
         if name == 'list':
             item.add_argument('--include-ended', action='store_true')
     io = commands.add_parser('io').add_subparsers(dest='action', required=True)
+    migrate = io.add_parser('migrate')
+    migrate.add_argument('--confirm-writers-drained', action='store_true')
+    migrate.add_argument('--subscriptions-file', help='Signal subscription specs to install atomically at cutover')
     for name in ('send', 'pending', 'status', 'complete', 'wake', 'emit'):
         item = io.add_parser(name)
         item.add_argument('--task', required=True)
@@ -134,6 +138,7 @@ def parser():
                 run.add_argument("--outcome", choices=("succeeded", "failed", "cancelled"), required=True)
                 run.add_argument("--completion-file", help="Verified terminal evidence to commit with finish; record unknown outcomes with run completion")
                 run.add_argument("--discard-output", action="store_true", help="Release failed/cancelled run, preserving unadopted work")
+                run.add_argument("--input-results-file", help="Verified input results to commit atomically with output and finish")
         elif name == "recover":
             run.add_argument("--stale", action="store_true", help="Only for observed stale Git-only runs")
             run.add_argument("--confirm-stopped", action="store_true")
@@ -164,12 +169,11 @@ def dispatch(args):
             return execution.plan(store, args.task, condition_adapter=args.condition_adapter, force=args.force)
         print(json.dumps({'operation_id': operation}), file=sys.stderr, flush=True)
         return execution.execute(store, operation, args.task, args.runner, args.executor,
-                                 condition_adapter=args.condition_adapter, continue_tasks=args.continue_tasks,
-                                 max_tasks=args.max_tasks, force=args.force,
+                                 condition_adapter=args.condition_adapter, force=args.force,
                                  completion_contracts=json.loads(Path(args.completion_contracts_file).read_text()) if args.completion_contracts_file else None)
     # Always expose a generated request identity before a remote mutation, so
     # an interrupted CLI can be retried without guessing another request ID.
-    mutation = args.command == "init" or args.action in ("add", "edit", "start", "publish", "finish", "recover", "cleanup", "activate", "recovery-policy", "renew", "checkpoint", "deliver-checkpoint", "heartbeat", "completion", 'send', 'complete', 'wake', 'emit', 'enable', 'subscribe', 'put', 'sync')
+    mutation = args.command == "init" or args.action in ("add", "edit", "start", "publish", "finish", "recover", "cleanup", "activate", "recovery-policy", "renew", "checkpoint", "deliver-checkpoint", "heartbeat", "completion", 'send', 'complete', 'wake', 'emit', 'enable', 'subscribe', 'put', 'sync', 'migrate')
     if mutation:
         print(json.dumps({"operation_id": operation}), file=sys.stderr, flush=True)
     if args.command == "init":
@@ -183,8 +187,12 @@ def dispatch(args):
             return signals.put(store, args.task, args.run_id, json.loads(Path(args.file).read_text()))
         if args.action == 'sync':
             return signals.sync(store, task_id=args.task)
-        return signals.subscribe(store, operation, args.task, args.consumer)
+        return signals.subscribe(store, operation, args.task, args.consumer, signal_id=args.signal_id, on=args.on, initial=args.initial)
     if args.command == 'io':
+        if args.action == 'migrate':
+            from . import main_io
+            return main_io.migrate(store, operation, drained=args.confirm_writers_drained,
+                                   subscriptions=json.loads(Path(args.subscriptions_file).read_text()) if args.subscriptions_file else None)
         if args.action == 'send':
             return task_io.send(store, operation, args.task, args.message_id, args.kind,
                                 json.loads(Path(args.payload_file).read_text()))
@@ -250,7 +258,8 @@ def dispatch(args):
         return runtime.publish(store, operation, task_id, run_id,
                                outcome=getattr(args, "outcome", None), summary=args.summary,
                                discard_output=getattr(args, "discard_output", False),
-                               completion_record=json.loads(Path(args.completion_file).read_text()) if getattr(args, 'completion_file', None) else None)
+                               completion_record=json.loads(Path(args.completion_file).read_text()) if getattr(args, 'completion_file', None) else None,
+                               input_results=json.loads(Path(args.input_results_file).read_text()) if getattr(args, 'input_results_file', None) else None)
     if args.action == "observe":
         return runtime.observe(store, task_id, run_id)
     if args.action == "recover":
