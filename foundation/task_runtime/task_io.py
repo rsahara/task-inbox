@@ -69,6 +69,48 @@ class IOStore(Store):
             return changes, self.manifest
         self.transact('io-initialize', {'kind': 'io-initialize', 'manifest': self.manifest}, apply, initialize=True)
 
+    def run_view(self, authority, stream):
+        """Project authority events together with the independent heartbeat."""
+        snapshot = copy.copy(authority)
+        snapshot.entries = dict(stream.entries)
+        prefix = runtime.run_path(self.run['task_id'], self.run['run_id'], self.run) + '/io/'
+        for path, entry in authority.entries.items():
+            if not path.startswith(prefix):
+                continue
+            name = path[len(prefix):]
+            if name in snapshot.entries and snapshot.entries[name] != entry:
+                raise TaskError('Authority and run stream I/O records conflict')
+            snapshot.entries[name] = entry
+        if snapshot.entries and CONTROL + '/config.json' not in snapshot.entries:
+            snapshot.entries[CONTROL + '/config.json'] = self.authority.blob(encode(self.manifest))
+        return snapshot
+
+    def transact(self, operation_id, request, apply, **kwargs):
+        from . import main_io
+        if (not self.run or request.get('kind') in ('io-initialize', 'io-heartbeat') or
+                not main_io.enabled(self.authority.snapshot())):
+            return super().transact(operation_id, request, apply, **kwargs)
+        # Existing run-I/O adapters must make their decisions against the same
+        # authority CAS as emit, rather than an isolated, stale stream tree.
+        identity(operation_id, 'operation ID')
+        task_id, run_id = self.run['task_id'], self.run['run_id']
+        key = digest(dict(kind='run-io', task_id=task_id, run_id=run_id, operation_id=operation_id))
+        wrapped = dict(kind='run-io', task_id=task_id, run_id=run_id, operation_id=operation_id, request=request)
+        def accept(authority):
+            current = runtime.load_run(authority, task_id, run_id, live=True)[2]
+            if current['generation'] != self.run['generation']:
+                raise TaskError('Run I/O generation changed')
+            stream = Snapshot(self, self.fetch(missing=True))
+            if stream.commit:
+                self.validate_config(stream.json(CONTROL + '/config.json'))
+            changes, result = apply(self.run_view(authority, stream))
+            prefix = runtime.run_path(task_id, run_id, current) + '/io/'
+            if any(not p.startswith(('events/', 'results/')) or not p.endswith('.json') for p in changes):
+                raise TaskError('Business run I/O transactions may only save events and results')
+            return {prefix + path: value for path, value in changes.items()}, result
+        result = self.authority.transact(key, wrapped, accept)
+        return dict(result, operation_id=operation_id)
+
     def optional(self):
         if self.run:
             authority = self.authority.snapshot()
@@ -94,6 +136,10 @@ class IOStore(Store):
         snapshot = Snapshot(self, commit)
         if snapshot.commit:
             self.validate_config(snapshot.json(CONTROL + '/config.json'))
+        if self.run:
+            from . import main_io
+            if main_io.enabled(authority):
+                return self.run_view(authority, snapshot)
         return snapshot
 
 

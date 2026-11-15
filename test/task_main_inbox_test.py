@@ -206,6 +206,40 @@ class MainInboxTest(RuntimeCase):
             self.assertEqual(maintenance.collect(self.sa, 'source', rid, apply=True)['status'], 'done')
             self.assertFalse(work.exists())
 
+    def test_live_io_reader_combines_authority_events_and_isolated_heartbeat(self):
+        self.run_source('live-events', [])
+        run = runtime.check(self.sa, 'source', 'live-events')
+        task_io.emit(self.sa, 'intent-live', 'source', 'live-events', 'intent', 'external-intent', {})
+        view = task_io.IOStore(self.sb, 'source', run).optional()
+        self.assertEqual(view.json('events/intent.json')['kind'], 'external-intent')
+        self.assertIsNone(view.json('state.json'))
+        runtime.heartbeat(self.sa, 'source', 'live-events')
+        view = task_io.IOStore(self.sb, 'source', run).optional()
+        self.assertEqual(view.json('events/intent.json')['kind'], 'external-intent')
+        self.assertEqual(view.json('state.json')['run_id'], 'live-events')
+
+    def test_run_io_transaction_rechecks_main_events_after_a_cas_conflict(self):
+        self.run_source('decision', [])
+        run = runtime.check(self.sa, 'source', 'decision')
+        stream = task_io.IOStore(self.sa, 'source', run)
+        stream.ensure()
+        push = self.sa.push
+        raced = []
+        def competing_push(ref, candidate, expected, **kwargs):
+            if ref == self.sa.ref and not raced:
+                raced.append(True)
+                task_io.emit(self.sb, 'external', 'source', 'decision', 'external', 'external-intent', {})
+            return push(ref, candidate, expected, **kwargs)
+        def decide(snapshot):
+            if snapshot.json('events/external.json'):
+                raise TaskError('External effects require reconciliation')
+            return {'events/failure.json': encode(dict(kind='failure'))}, {}
+        with patch.object(self.sa, 'push', side_effect=competing_push):
+            with self.assertRaisesRegex(TaskError, 'External effects'):
+                stream.transact('decide-failure', dict(kind='fixture-decision'), decide)
+        self.assertIsNone(self.sa.snapshot().read('tasks/source/runs/decision/io/events/failure.json'))
+        self.assertEqual(runtime.check(self.sa, 'source', 'decision')['status'], 'running')
+
     def test_required_output_and_type_contract(self):
         runtime.edit_task(self.sa, 'required', 'source', 1, interface=interface(True))
         self.run_source('one', [])

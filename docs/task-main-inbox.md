@@ -139,6 +139,9 @@ mid-run authority transactions for durable external-operation intents and result
 They do not snapshot other dirty files. Heartbeat keeps only a final checkpoint,
 without its commit history on main. Lease-enabled recovery profiles additionally
 renew their authority fence; those ownership operations are not business snapshots.
+Run I/O readers combine authority events with the isolated heartbeat stream while
+a run is active. Existing `IOStore.transact` event/result decisions also use the
+authority CAS, so an external intent cannot be hidden by a stale run-ref snapshot.
 
 ## Migration and host integration
 
