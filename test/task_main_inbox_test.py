@@ -1,8 +1,9 @@
 """Real Git regression tests for atomic main inbox and signal contracts."""
 import json
+import sys
 from unittest.mock import patch
 
-from task_runtime_test import RuntimeCase
+from task_runtime_test import ROOT, RuntimeCase
 from task_runtime import main_io, runtime, signals, task_io
 from task_runtime.store import GitFailure, TaskError, encode, git
 
@@ -202,6 +203,24 @@ class MainInboxTest(RuntimeCase):
             self.finish('one')
         self.assertEqual(self.sa.fetch(), before)
         self.assertEqual(signals.catalog(self.sb.snapshot(), 'source'), {})
+
+    def test_packaged_cli_validates_declared_values_and_delivers_at_finish(self):
+        declared = interface()
+        declared['signals']['writes'][0]['value_schema'] = 'schemas/value.json'
+        runtime.edit_task(self.sa, 'declare-schema', 'source', 1, interface=declared)
+        self.sa.transact('schema-file', dict(kind='fixture'), lambda s: ({
+            'tasks/source/schemas/value.json': encode(dict(type='object', required=['count']))}, {}))
+        signals.subscribe(self.sa, 'sub', 'source', 'viewer', signal_id='data-a')
+        self.run_source('one', [])
+        package = self.base / 'task-inbox.pyz'
+        self.command(sys.executable, str(ROOT / 'bin/build-task-inbox'), '--output', str(package))
+        value = self.base / 'signal.json'; value.write_bytes(encode(signal()))
+        common = (sys.executable, str(package), '--repo', str(self.a))
+        self.command(*common, 'signal', 'put', '--task', 'source', '--run-id', 'one', '--file', str(value))
+        self.assertFalse(task_io.pending(self.sb, 'viewer')['messages'])
+        self.command(*common, '--operation-id', 'packaged-finish', 'run', 'finish', '--task', 'source',
+                     '--run-id', 'one', '--outcome', 'succeeded')
+        self.assertEqual(len(task_io.pending(self.sb, 'viewer')['messages']), 1)
 
 
     def test_executor_owned_dirty_files_and_index_survive_finish(self):
