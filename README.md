@@ -6,8 +6,7 @@ acknowledge results. task-inbox coordinates concurrency, progress, and recovery
 across processes or machines.
 
 Use it with your existing workers and scheduler. `task-inbox execute` checks
-conditions, admits and supervises a worker, and optionally continues to another
-eligible task. An installed executor adapter supplies the agent or script.
+conditions, admits and supervises one task per invocation. An installed executor adapter supplies the agent or script.
 
 ## Task and caller design
 
@@ -27,25 +26,19 @@ flowchart LR
     E --> R{"Declared inputs ready?<br/>Task open? Slot available?"}
     R -->|yes| X["Installed executor adapter"]
     X --> T["Selected task<br/>Own inputs, work, outputs"]
-    T -->|publish own state| S[("Signals and outputs in Git")]
-    S -->|subscription sync| I[("Subscriber inbox")]
-    T -->|explicit request| I
-    T -->|verified completion| E
-    E --> C{"--continue permitted<br/>and within limit?"}
-    C -->|yes: recheck allowed tasks| R
-    C -->|no| N["Return pending work to caller"]
-    I --> R
+    T -->|successful finish| A["Atomic main commit: output, input results,<br/>finish, slot release, subscriber inboxes"]
+    A --> N["Return pending work to caller"]
     N --> H
 ```
 
-Subscriptions and execution allowlists are caller configuration. Producers do
-not name subscribers in their signal declarations. A same-invocation chain and a
-later scheduled or triggered run use the same readiness checks; each task gets
-its own run ID, ownership, workspace and heartbeat. Notification persistence is
-separate from delivery of a host-specific startup hint.
+Subscriptions are caller configuration. Producers declare signal IDs and types,
+without naming subscribers. task-inbox persists notifications; the host watches
+inbox updates and starts each next task independently. Heartbeats stay on a
+separate run stream and never merge their history into main.
 
-See the [execution and task interface contract](docs/task-execution.md) for
-declarations, adapters, continuation, recovery and migration.
+See the [main inbox protocol](docs/task-main-inbox.md) for schema 11 adoption,
+atomic finish, signal conditions and workspace behavior, and the
+[execution contract](docs/task-execution.md) for adapters and recovery.
 
 ### Responsibility and storage map
 
@@ -165,13 +158,9 @@ kinds, signal types and readiness. Then use the same entrypoint from any host:
 python3 bin/task-inbox --repo /path/to/task-data execute --task example --check
 python3 bin/task-inbox --repo /path/to/task-data --operation-id invocation-1 \
   execute --task example --runner worker-1 --executor /opt/workers/task-executor
-python3 bin/task-inbox --repo /path/to/task-data --operation-id invocation-2 \
-  execute --task example --task report --runner worker-1 \
-  --executor /opt/workers/task-executor --continue --max-tasks 4
 ```
 
-The default executes at most one eligible task. Continuation only selects from
-the caller's ordered `--task` allowlist. `--check` never admits or launches a run.
+Execution admits at most one task. Each next task requires a separate caller invocation. `--check` never admits or launches a run.
 Tasks without a declaration remain manual; `--force` explicitly requests the
 first task once. Existing `io wake` and `run` commands remain available for
 integrations managing individual lifecycle steps.

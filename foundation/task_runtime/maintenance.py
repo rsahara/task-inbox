@@ -20,7 +20,7 @@ def finish_record(run, operation_id, preparation, discard):
                 "source_head": run["source_head"], "has_checkpoint": preparation["has_checkpoint"]}
     else:
         record.update(preparation["cleanup"])
-        record["work_head"] = run["source_head"]
+        record["work_head"] = preparation["cleanup"].get("work_head") if run.get("main_inbox_protocol") else run["source_head"]
     return record
 
 
@@ -49,7 +49,7 @@ def terminal(store, snapshot, task_id, run_id):
     if (run["work_ref"] != prefix + "/work" or run["heartbeat_ref"] != heartbeat_ref or
             any(refs_overlap(ref, store.ref) for ref in (run["work_ref"], run["heartbeat_ref"]))):
         raise TaskError("Cleanup ref is outside the original run namespace")
-    if record.get("work_head") != run["source_head"]:
+    if not run.get("main_inbox_protocol") and record.get("work_head") != run["source_head"]:
         raise TaskError("Cleanup source differs from the accepted source")
     return run, record
 
@@ -173,25 +173,30 @@ def collect_local(store, run):
             common = (work / git(work, "rev-parse", "--git-common-dir")).resolve()
             if common != store.common or git(work, "symbolic-ref", "HEAD") != run["work_ref"]:
                 raise TaskError("Workspace repository or branch changed")
-            if git(work, "rev-parse", "HEAD") != run["source_head"]:
+            expected_head = run.get('workspace_head') if run.get('main_inbox_protocol') else run['source_head']
+            if git(work, "rev-parse", "HEAD") != expected_head:
                 raise TaskError("Workspace contains unpreserved commits")
-            if (git(work, "status", "--porcelain", "--untracked-files=all") or
+            if run.get('main_inbox_protocol'):
+                from . import main_io
+                main_io.verify_saved_workspace(store, run, work)
+            elif (git(work, "status", "--porcelain", "--untracked-files=all") or
                     git(work, "ls-files", "--others", "--ignored", "--exclude-standard")):
                 raise TaskError("Workspace contains unpreserved files")
             source = Snapshot(store, run["source_head"])
             for path, entry in run["artifact_manifest"].items():
-                if source.entries.get(path) != (tuple(entry) if entry else None):
+                if not run.get('main_inbox_protocol') and source.entries.get(path) != (tuple(entry) if entry else None):
                     raise TaskError("Workspace does not match the accepted output")
-            git(store.repo, "worktree", "remove", str(work))
+            git(store.repo, "worktree", "remove", *(["--force"] if run.get("main_inbox_protocol") else []), str(work))
         elif registered:
             # A missing registered directory may be a disconnected mount.
             raise TaskError("Workspace is missing but still registered; retained")
         if git(store.repo, "show-ref", "--verify", "--quiet", run["work_ref"], predicate=True):
-            if git(store.repo, "rev-parse", run["work_ref"]) != run["source_head"]:
+            expected_head = run.get('workspace_head') if run.get('main_inbox_protocol') else run['source_head']
+            if git(store.repo, "rev-parse", run["work_ref"]) != expected_head:
                 raise TaskError("Local work branch changed; retained")
             if "branch " + run["work_ref"] in git(store.repo, "worktree", "list", "--porcelain").splitlines():
                 raise TaskError("Local work branch is still checked out")
-            git(store.repo, "update-ref", "-d", run["work_ref"], run["source_head"])
+            git(store.repo, "update-ref", "-d", run["work_ref"], expected_head)
         remove_local_records(state_path)
         return "removed"
 

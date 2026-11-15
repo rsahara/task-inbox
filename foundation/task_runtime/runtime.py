@@ -444,7 +444,9 @@ def prepare(store, task_id, run_id, path, mode="worktree", *, restore=False, sto
         if old and old.get("prepared"):
             if not path.exists() or git(path, "rev-parse", "--show-toplevel") != str(path.resolve()):
                 raise TaskError("Registered workspace is missing or changed")
-            if not git(path, "merge-base", "--is-ancestor", run["source_head"], "HEAD", predicate=True):
+            from . import main_io
+            ancestor = run['definition_commit'] if main_io.enabled(store.snapshot()) else run['source_head']
+            if not git(path, "merge-base", "--is-ancestor", ancestor, "HEAD", predicate=True):
                 raise TaskError("Workspace does not contain the saved source")
             record_workspace_preparation(store, task_id, run_id, run, old, state_path)
             return old
@@ -470,9 +472,12 @@ def prepare(store, task_id, run_id, path, mode="worktree", *, restore=False, sto
             raise TaskError("Interrupted preparation must retain its original checkpoint")
         state["start_head"] = start_head
         if mode == "workspace":
+            from . import main_io
             if (git(path, "rev-parse", "HEAD") != start_head or
-                    git(path, "status", "--porcelain", "--untracked-files=all")):
+                    (not main_io.enabled(store.snapshot()) and git(path, "status", "--porcelain", "--untracked-files=all"))):
                 raise TaskError("Provisioned workspace must be clean at the pinned definition commit")
+            if main_io.enabled(store.snapshot()) and 'preserved_files' not in state:
+                state['preserved_files'] = main_io.preserved_files(path)
             other_common = (path / git(path, "rev-parse", "--git-common-dir")).resolve()
             if other_common != store.common:
                 raise TaskError("Use --repo pointing at the provisioned workspace")
@@ -521,7 +526,10 @@ def names(repo, *args):
     return [p.decode() for p in git(repo, *args, binary=True).split(b"\0") if p]
 
 
-def source_snapshot(store, task_id, run_id, state, run):
+def source_snapshot(store, task_id, run_id, state, run, *, include_signals=True):
+    from . import main_io
+    if main_io.enabled(store.snapshot()):
+        return main_io.workspace_snapshot(store, task_id, run_id, state, run, include_signals=include_signals)
     work = Path(state["path"])
     if not state.get("prepared") or state["generation"] != run["generation"]:
         raise TaskError("Workspace is not prepared for this run")
@@ -577,18 +585,20 @@ def checkpoint_ref(store, ref, source):
     return expected
 
 
-def publish(store, operation_id, task_id, run_id, *, outcome=None, summary="", discard_output=False, completion_record=None):
+def publish(store, operation_id, task_id, run_id, *, outcome=None, summary="", discard_output=False, completion_record=None, input_results=None):
     result = _publish(store, operation_id, task_id, run_id, outcome=outcome,
-                      summary=summary, discard_output=discard_output, completion_record=completion_record)
+                      summary=summary, discard_output=discard_output, completion_record=completion_record, input_results=input_results)
     from . import signals
-    delivery = signals.require_delivery(signals.sync(store, task_id=task_id))
+    from . import main_io
+    delivery = (dict(delivered=result.get('notifications_saved', 0), blocked=[], needs_attention=False)
+                if main_io.enabled(store.snapshot()) else signals.require_delivery(signals.sync(store, task_id=task_id)))
     if outcome:
         from . import maintenance
         maintenance.maintain(store, task_id, run_id)
     return dict(result, notifications=delivery)
 
 
-def _publish(store, operation_id, task_id, run_id, *, outcome=None, summary="", discard_output=False, completion_record=None):
+def _publish(store, operation_id, task_id, run_id, *, outcome=None, summary="", discard_output=False, completion_record=None, input_results=None):
     if outcome not in (None, "succeeded", "failed", "cancelled"):
         raise TaskError("Invalid run outcome")
     if discard_output and outcome not in ("failed", "cancelled"):
@@ -596,6 +606,10 @@ def _publish(store, operation_id, task_id, run_id, *, outcome=None, summary="", 
     state_path = local_state(store, task_id, run_id)
     request = dict(kind="run-finish" if outcome else "run-publish", task_id=task_id,
                    run_id=run_id, outcome=outcome, summary=summary, discard_output=discard_output)
+    if input_results is not None:
+        if not outcome:
+            raise TaskError('Input completions can be bundled only with finish')
+        request['input_results'] = input_results
     if completion_record is not None:
         if not outcome:
             raise TaskError('Completion evidence can be supplied only with finish')
@@ -603,6 +617,8 @@ def _publish(store, operation_id, task_id, run_id, *, outcome=None, summary="", 
     # Replays must reconcile the original candidate even after termination or
     # workspace removal; never regenerate the requested operation's source.
     operation_path = store.local / "publications" / (identity(operation_id) + ".json")
+    from . import main_io
+    authority_inbox = main_io.enabled(store.snapshot())
     with store.lock(state_path.with_suffix(".lock")):
         receipt = store.snapshot().metadata(CONTROL + "/operations/" + operation_id + ".json")
         if receipt:
@@ -627,8 +643,10 @@ def _publish(store, operation_id, task_id, run_id, *, outcome=None, summary="", 
             if state_path.exists() and not discard_output:
                 state = json.loads(state_path.read_text())
                 workspace_evidence_id = state.get('workspace_evidence_id')
-                source, touched = source_snapshot(store, task_id, run_id, state, run)
-                previous_work_ref = checkpoint_ref(store, run["work_ref"], source.commit)
+                source, touched = source_snapshot(store, task_id, run_id, state, run,
+                                                  include_signals=outcome == 'succeeded')
+                if not authority_inbox:
+                    previous_work_ref = checkpoint_ref(store, run["work_ref"], source.commit)
             else:
                 if not discard_output:
                     raise TaskError("Prepare or restore the run workspace before publishing or finishing")
@@ -638,7 +656,7 @@ def _publish(store, operation_id, task_id, run_id, *, outcome=None, summary="", 
             preparation = {"request_hash": digest(request), "source_head": source.commit,
                            "previous_source": run["source_head"], "generation": run["generation"],
                            "touched": sorted(touched), "work_ref": run["work_ref"],
-                           "has_checkpoint": state_path.exists() and not discard_output,
+                           "has_checkpoint": state_path.exists() and not discard_output and not authority_inbox,
                            # An exposed checkpoint can leave workspaces in
                            # other clones; this clone cannot confirm their GC.
                            "workspace_history_unobserved": (outcome is None or discard_output or
@@ -651,6 +669,11 @@ def _publish(store, operation_id, task_id, run_id, *, outcome=None, summary="", 
                     "heartbeat_checkpoint": Snapshot(store, beat).json("state.json") if beat else None}
                 from . import task_io
                 preparation['cleanup']['io_manifest'] = task_io.finish_manifest(store, run, beat)
+            if authority_inbox:
+                preparation['local_confirmation'] = state if state_path.exists() and not discard_output else {}
+                preparation['workspace_head'] = git(Path(state['path']), 'rev-parse', 'HEAD') if state_path.exists() and not discard_output else None
+                if 'cleanup' in preparation:
+                    preparation['cleanup']['work_head'] = store.remote_tip(run['work_ref'])
             atomic_json(operation_path, preparation)
         source = Snapshot(store, preparation["source_head"])
         baseline = Snapshot(store, preparation["previous_source"])
@@ -658,15 +681,19 @@ def _publish(store, operation_id, task_id, run_id, *, outcome=None, summary="", 
             task, runtime, run = load_run(snapshot, task_id, run_id, live=True)
             if run["generation"] != preparation["generation"] or run["source_head"] != preparation["previous_source"]:
                 raise TaskError("Another publication changed this run; do not replace the original candidate")
-            if not discard_output and snapshot.content_hash(data_prefix(run, task_id)) != run["data_hash"]:
+            if not authority_inbox and not discard_output and snapshot.content_hash(data_prefix(run, task_id)) != run["data_hash"]:
                 raise TaskError("Shared task data changed; recompute in a new run")
             changes = {}
             for path in preparation["touched"]:
                 if not allowed(task_id, run_id, path, run):
                     raise TaskError("Publication crosses the run boundary")
+                if authority_inbox and path.startswith(data_prefix(run, task_id) + 'signals/') and outcome != 'succeeded':
+                    continue
                 expected, current, new = baseline.entries.get(path), snapshot.entries.get(path), source.entries.get(path)
                 if current != expected:
-                    raise TaskError("Output path changed since the source snapshot")
+                    if not authority_inbox:
+                        raise TaskError("Output path changed since the source snapshot")
+                    new = main_io.merge_entry(store, path, expected, current, new)
                 changes[path] = new
                 run["artifact_manifest"][path] = new
             for path, entry in run["artifact_manifest"].items():
@@ -677,16 +704,26 @@ def _publish(store, operation_id, task_id, run_id, *, outcome=None, summary="", 
                         raise TaskError("Previously saved run artifact changed")
             if 'data_revision' in runtime and any(p.startswith(data_prefix(run, task_id)) for p in changes):
                 runtime["data_revision"] += 1
-            if not discard_output:
+            if not discard_output and (not authority_inbox or outcome == 'succeeded'):
                 from . import signals
                 signals.publication(snapshot, run, source, preparation["touched"], operation_id)
+            if authority_inbox:
+                from . import signals
+                notifications, count = signals.finish_changes(store, snapshot, source, run, outcome, changes,
+                    preparation.get('local_confirmation', {}))
+                changes.update(notifications)
+                run['notifications_saved'] = count
+                if input_results is not None:
+                    changes.update(main_io.complete_changes(snapshot, task_id, run, input_results))
+                run['workspace_head'] = preparation.get('workspace_head')
+                run['main_inbox_protocol'] = 1
             updated = dict(snapshot.entries)
             for path, entry in changes.items():
                 if entry is None:
                     updated.pop(path, None)
                 else:
                     updated[path] = entry
-            run["data_hash"] = digest({p: e for p, e in updated.items() if p.startswith(data_prefix(run, task_id))})
+            run["data_hash"] = digest({p: (store.blob(e) if isinstance(e, bytes) else e) for p, e in updated.items() if p.startswith(data_prefix(run, task_id))})
             run["source_head"] = preparation["source_head"]
             run['workspace_history_unobserved'] = (
                 run['publication_count'] != 0 or

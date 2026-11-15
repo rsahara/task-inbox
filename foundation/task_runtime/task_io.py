@@ -123,6 +123,13 @@ def send(store, operation_id, task_id, message_id, kind, payload):
     runtime.load_task(store.snapshot(), task_id)  # A paused task can still receive requests.
     identity(message_id, 'message ID'); identity(kind, 'message kind')
     message = dict(schema_version=1, id=message_id, kind=kind, payload=bounded(payload))
+    from . import main_io
+    if main_io.enabled(store.snapshot()):
+        result = store.transact(operation_id, dict(kind='io-send', task_id=task_id, message=message),
+            lambda snapshot: (main_io.append(snapshot, task_id, message), message))
+        return dict(result, message_id=message_id, task_id=task_id, ref=store.ref,
+                    commit=store.snapshot().commit, message_sha256=digest(message), accepted=True,
+                    delivery_status='pending')
     stream = IOStore(store, task_id)
     stream.ensure()
     path = 'messages/' + message_id + '.json'
@@ -139,6 +146,13 @@ def send(store, operation_id, task_id, message_id, kind, payload):
 
 def message(store, task_id, message_id):
     identity(message_id, 'message ID')
+    from . import main_io
+    authority = store.snapshot()
+    if main_io.enabled(authority):
+        value = authority.json(main_io.inbox(authority, task_id) + identity(message_id) + '.json')
+        if value is None:
+            raise TaskError('Task I/O message not found')
+        return value, dict(ref=store.ref, commit=authority.commit, message_sha256=digest(value))
     stream = IOStore(store, task_id)
     snapshot = stream.optional()
     value = snapshot.json('messages/' + message_id + '.json')
@@ -154,6 +168,18 @@ def receipt_path(task_id, message_id, snapshot=None):
 def pending(store, task_id, *, authority=None):
     authority = authority or store.snapshot()
     runtime.load_task(authority, task_id)
+    from . import main_io
+    if main_io.enabled(authority):
+        prefix_path = main_io.inbox(authority, task_id)
+        rows = []
+        for path in sorted(authority.entries):
+            if path.startswith(prefix_path) and path.endswith('.json'):
+                value = authority.json(path)
+                if path != prefix_path + identity(value.get('id')) + '.json':
+                    raise TaskError('Malformed task I/O message path')
+                if not authority.json(receipt_path(task_id, value['id'], authority)):
+                    rows.append(value)
+        return dict(task_id=task_id, ref=store.ref, commit=authority.commit, messages=rows)
     stream = IOStore(store, task_id)
     snapshot = stream.optional()
     rows = []
@@ -195,6 +221,16 @@ def emit(store, operation_id, task_id, run_id, event_id, kind, payload):
     run = runtime.check(store, task_id, run_id)
     event = dict(schema_version=1, id=identity(event_id), kind=identity(kind), payload=bounded(payload),
                  task_id=task_id, run_id=run_id, generation=run['generation'])
+    from . import main_io
+    if main_io.enabled(store.snapshot()):
+        path = runtime.run_path(task_id, run_id, run) + '/io/events/' + event_id + '.json'
+        def accept(snapshot):
+            runtime.load_run(snapshot, task_id, run_id, live=True)
+            previous = snapshot.json(path)
+            if previous is not None and previous != event:
+                raise TaskError('Run event ID already used with different content')
+            return ({path: encode(event)} if previous is None else {}), event
+        return store.transact(operation_id, dict(kind='io-emit', event=event), accept)
     stream = IOStore(store, task_id, run)
     stream.ensure()
     path = 'events/' + event_id + '.json'
@@ -228,6 +264,17 @@ def _receipt(store, task_id, run_id, message_id, run):
 def complete(store, operation_id, task_id, run_id, message_id, value):
     """Save a candidate and accept it with one caller-owned retry identity."""
     identity(operation_id, 'operation ID')
+    from . import main_io
+    if main_io.enabled(store.snapshot()):
+        request = dict(kind='run-io-complete', task_id=task_id, run_id=run_id,
+                       message_id=message_id, result=value)
+        def accept(snapshot):
+            run = runtime.load_run(snapshot, task_id, run_id, live=True)[2]
+            changes = main_io.complete_changes(snapshot, task_id, run, {message_id: value})
+            path = receipt_path(task_id, message_id, snapshot)
+            import json
+            return changes, json.loads(changes[path]) if path in changes else snapshot.json(path)
+        return store.transact(operation_id, request, accept)
     try:
         return _complete(store, operation_id, task_id, run_id, message_id, value)
     except TaskError as error:

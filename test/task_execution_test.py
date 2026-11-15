@@ -1,4 +1,4 @@
-"""Portable contracts, readiness, continuation and durable launch recovery."""
+"""Portable contracts, readiness, single-task execution and durable launch recovery."""
 import concurrent.futures
 import json
 import os
@@ -79,42 +79,43 @@ class ExecutionTest(fixtures.RuntimeCase):
         self.assertEqual(runtime.load_run(self.sb.snapshot(), 't', run_id)[2]['publication_count'], 2)
         self.assertEqual(self.execute(store=self.sb)['steps'], result['steps'])
         with self.assertRaisesRegex(TaskError, 'another request'):
-            self.execute(continue_tasks=True)
+            self.execute(force=True)
 
-    def test_continuation_is_opt_in_and_signal_delivery_launches_only_allowlisted_tasks(self):
+    def test_signal_delivery_never_launches_consumers(self):
         self.setup_tasks('a', 'b', 'excluded')
         signals.subscribe(self.sa, 'subscribe-b', 'a', 'b')
         signals.subscribe(self.sa, 'subscribe-excluded', 'a', 'excluded')
         self.send('a')
-        first = self.execute(tasks=['a', 'b'])
+        first = self.execute(tasks=['a'])
         self.assertEqual([s['task_id'] for s in first['steps']], ['a'])
-        self.assertEqual(first['pending_tasks'], ['b'])
-        second = self.execute('next', tasks=['a', 'b'], continue_tasks=True)
+        self.assertEqual(runtime.list_runs(self.sa.snapshot(), 'b'), [])
+        second = self.execute('next', tasks=['b'])
         self.assertEqual([s['task_id'] for s in second['steps']], ['b'])
-        self.assertEqual(second['reason'], 'no_ready_task')
         self.assertEqual(len(task_io.pending(self.sa, 'excluded')['messages']), 1)
         self.assertEqual(runtime.list_runs(self.sa.snapshot(), 'excluded'), [])
 
-    def test_one_invocation_can_chain_signals_and_each_task_gets_its_own_grant(self):
-        self.setup_tasks('a', 'b'); signals.subscribe(self.sa, 'subscribe', 'a', 'b'); self.send('a')
-        result = self.execute(tasks=['a', 'b'], continue_tasks=True)
-        self.assertEqual([s['task_id'] for s in result['steps']], ['a', 'b'])
-        self.assertNotEqual(result['steps'][0]['run_id'], result['steps'][1]['run_id'])
-        for step in result['steps']:
+    def test_each_caller_invocation_admits_exactly_one_task(self):
+        self.setup_tasks('a', 'b'); self.send('a'); self.send('b')
+        with self.assertRaisesRegex(TaskError, 'exactly one task'):
+            self.execute(tasks=['a', 'b'])
+        steps = self.execute(tasks=['a'])['steps'] + self.execute('second', tasks=['b'])['steps']
+        self.assertNotEqual(steps[0]['run_id'], steps[1]['run_id'])
+        for step in steps:
             run = runtime.load_run(self.sb.snapshot(), step['task_id'], step['run_id'])[2]
             self.assertIn('execution_claim', run)
             self.assertEqual(run['status'], 'succeeded')
 
-    def test_conditions_use_fixed_signals_and_execute_at_most_once_per_invocation(self):
+    def test_conditions_use_fixed_signals_and_execute_once(self):
         self.setup_tasks('a', 'b')
         runtime.edit_task(self.sa, 'condition', 'b', 1,
                           interface=declaration('condition', inbox=[], reads=[{'type': 'report', 'task_id': 'a'}]))
         checker = self.checker()
         self.assertFalse(execution.plan(self.sa, ['b'], condition_adapter=checker)['decisions'][0]['ready'])
         self.send('a')
-        result = self.execute(tasks=['a', 'b'], continue_tasks=True, condition_adapter=checker)
-        self.assertEqual([s['task_id'] for s in result['steps']], ['a', 'b'])
-        decision = result['next']['decisions'][1]
+        self.execute(tasks=['a'])
+        result = self.execute('consumer', tasks=['b'], condition_adapter=checker)
+        self.assertEqual([s['task_id'] for s in result['steps']], ['b'])
+        decision = result['next']['decisions'][0]
         self.assertEqual(decision['reason'], 'already_executed')
         self.assertEqual(decision['signals'][0]['sha256'], signals.catalog(self.sa.snapshot(), 'a')['report']['sha256'])
 
@@ -137,12 +138,12 @@ class ExecutionTest(fixtures.RuntimeCase):
     def test_nonzero_exit_preserves_slot_and_does_not_chain(self):
         self.setup_tasks('a', 'b'); self.send('a'); self.send('b')
         self.script('import sys\nsys.exit(7)\n')
-        result = self.execute(tasks=['a', 'b'], continue_tasks=True)
+        result = self.execute(tasks=['a'])
         self.assertTrue(result['needs_attention'])
         self.assertEqual(result['reason'], 'executor_failed_or_interrupted')
         self.assertEqual(runtime.list_runs(self.sa.snapshot(), 'b'), [])
         self.assertEqual(len(task_io.pending(self.sa, 'a')['messages']), 1)
-        self.assertEqual(self.execute(tasks=['a', 'b'], continue_tasks=True)['reason'], result['reason'])
+        self.assertEqual(self.execute(tasks=['a'])['reason'], result['reason'])
 
     def test_successful_process_without_bound_result_cannot_finish(self):
         self.setup_tasks(); self.send(); self.script('pass\n')
@@ -209,16 +210,16 @@ class ExecutionTest(fixtures.RuntimeCase):
         self.assertEqual(sum(len(r['steps']) for r in results), 1)
         self.assertEqual(len(runtime.list_runs(self.sa.snapshot(), 't')), 1)
 
-    def test_executor_path_and_continuation_limits_are_caller_owned(self):
+    def test_executor_path_and_single_task_scope_are_caller_owned(self):
         self.setup_tasks()
-        with self.assertRaisesRegex(TaskError, '--continue'):
-            self.execute(max_tasks=2)
+        with self.assertRaisesRegex(TaskError, 'exactly one task'):
+            self.execute(tasks=['t', 'other'])
         with self.assertRaisesRegex(TaskError, 'installed executable'):
             execution.execute(self.sa, 'bad', ['t'], 'worker', 'relative-command')
         with self.assertRaises(TaskError):
             execution.plan(self.sa, ['t', 't'])
-        with self.assertRaises(TaskError):
-            self.execute(max_tasks=0)
+        with self.assertRaises(TypeError):
+            self.execute(continue_tasks=True)
 
     def test_completion_contract_is_bound_at_admission_and_verified_at_finish(self):
         self.setup_tasks(); self.send()
@@ -229,7 +230,7 @@ class ExecutionTest(fixtures.RuntimeCase):
         with self.assertRaises(TaskError):
             self.execute('other', completion_contracts={'outside': {'required': ['git']}})
 
-    def test_late_arrival_is_processed_by_a_separate_run_within_the_bound(self):
+    def test_late_arrival_waits_for_a_separate_caller_invocation(self):
         self.setup_tasks(); self.send()
         original = runtime.publish
         arrivals = []
@@ -240,9 +241,10 @@ class ExecutionTest(fixtures.RuntimeCase):
             return original(*args, **kwargs)
 
         with patch.object(runtime, 'publish', side_effect=arrive):
-            result = self.execute(continue_tasks=True, max_tasks=2)
-        self.assertEqual([s['task_id'] for s in result['steps']], ['t', 't'])
-        self.assertEqual(result['pending_tasks'], [])
+            result = self.execute()
+        self.assertEqual([s['task_id'] for s in result['steps']], ['t'])
+        self.assertEqual(result['pending_tasks'], ['t'])
+        self.execute('next')
         self.assertEqual(task_io.pending(self.sb, 't')['messages'], [])
 
     def test_cli_has_one_entry_for_check_execute_and_interface_updates(self):
@@ -350,7 +352,7 @@ class ExecutionTest(fixtures.RuntimeCase):
                     'r={k:c["run"][k] for k in ("task_id","run_id","generation")}\n'
                     'r.update(protocol=c["protocol"],outcome="failed",summary="Verified failure")\n'
                     'Path(c["result_path"]).write_text(json.dumps(r))\n')
-        result = self.execute(tasks=['a', 'b'], continue_tasks=True)
+        result = self.execute(tasks=['a'])
         self.assertTrue(result['needs_attention'])
         self.assertEqual(result['steps'][0]['outcome'], 'failed')
         self.assertEqual(runtime.list_runs(self.sa.snapshot(), 'b'), [])

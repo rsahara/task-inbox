@@ -50,12 +50,16 @@ def inputs(store, snapshot, task_id, interface):
             notice = message.get('payload', {})
             owner, sid, revision = notice.get('task_id'), notice.get('signal_id'), notice.get('revision')
             if (not isinstance(owner, str) or not isinstance(sid, str) or type(revision) is not int
-                    or revision < 1 or message['id'] != signals.message_id(owner, sid, revision)):
+                    or revision < 1 or (notice.get('schema_version') != 2 and message['id'] != signals.message_id(owner, sid, revision))):
                 raise TaskError('Invalid signal notification in declared inbox')
-            record = catalog(owner).get(sid)
-            if not record or record['value']['revision'] < revision:
-                raise TaskError('Signal notification is ahead of the fixed authority snapshot; retry')
-            accepted = any(interfaces.matches(record['value'], selector) for selector in reads)
+            if notice.get('schema_version') == 2:
+                record_value = signals.read_notice(store, message, snapshot=snapshot)['signal']
+            else:
+                record = catalog(owner).get(sid)
+                if not record or record['value']['revision'] < revision:
+                    raise TaskError('Signal notification is ahead of the fixed authority snapshot; retry')
+                record_value = record['value']
+            accepted = any(interfaces.matches(record_value, selector) for selector in reads)
         (eligible if accepted else ignored).append(message['id'])
     return dict(message_ids=eligible, ignored_message_ids=ignored, signals=current)
 
@@ -162,21 +166,20 @@ def worker_result(path, run):
 
 
 def execute(store, execution_id, task_ids, runner, executor, *, condition_adapter=None,
-            continue_tasks=False, max_tasks=None, force=False, completion_contracts=None):
+            force=False, completion_contracts=None):
     identity(execution_id, 'execution ID')
     task_ids = selected_tasks(task_ids)
     identity(runner, 'runner ID')
     program = installed(store, executor, 'Executor')
     checker = installed(store, condition_adapter, 'Condition adapter') if condition_adapter else None
-    limit = runtime.positive(max_tasks if max_tasks is not None else (16 if continue_tasks else 1), 'max_tasks', 100)
-    if not continue_tasks and limit != 1:
-        raise TaskError('More than one task requires --continue')
+    if len(task_ids) != 1:
+        raise TaskError('Execute admits exactly one task per invocation')
+    limit = 1
     contracts = completion_contracts if completion_contracts is not None else {}
     if not isinstance(contracts, dict) or not set(contracts) <= set(task_ids):
         raise TaskError('Completion contracts must map allowed task IDs to contracts')
     contracts = {task_id: completion.contract(value) for task_id, value in contracts.items()}
-    request = dict(kind='execution-begin', tasks=task_ids, runner=runner, continue_tasks=continue_tasks,
-                   max_tasks=limit, force=force, completion_contracts=contracts,
+    request = dict(kind='execution-begin', tasks=task_ids, runner=runner,  force=force, completion_contracts=contracts,
                    executor_sha256=hashlib.sha256(Path(program).read_bytes()).hexdigest(),
                    condition_sha256=hashlib.sha256(Path(checker).read_bytes()).hexdigest() if checker else None)
     # The shared operation receipt is the caller intent. No separate application
@@ -251,7 +254,7 @@ def execute(store, execution_id, task_ids, runner, executor, *, condition_adapte
             value = worker_result(result_path, current)
             runtime.publish(store, operation(execution_id, 'finish', index), task_id, run_id,
                             outcome=value['outcome'], summary=value['summary'],
-                            completion_record=value.get('completion'))
+                            completion_record=value.get('completion'), input_results=value.get('input_results'))
             saved = runtime.load_run(store.snapshot(), task_id, run_id)[2]
             if saved['status'] != value['outcome']:
                 raise TaskError('Terminal run readback failed; retain the execution ID')
