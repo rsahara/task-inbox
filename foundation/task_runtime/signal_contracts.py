@@ -13,8 +13,10 @@ def validate_value(value, schema, depth=0):
              'number': lambda v: type(v) in (int, float), 'boolean': lambda v: type(v) is bool,
              'null': lambda v: v is None}
     kind = schema.get('type')
-    if kind is not None and (kind not in types or not types[kind](value)):
+    if kind is not None and (not isinstance(kind, str) or kind not in types or not types[kind](value)):
         raise TaskError('Signal value does not match its declared type')
+    if 'enum' in schema and not isinstance(schema['enum'], list):
+        raise TaskError('Signal schema enum must be a list')
     if 'enum' in schema and value not in schema['enum']:
         raise TaskError('Signal value is outside the declared enum')
     if isinstance(value, dict):

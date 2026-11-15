@@ -72,8 +72,9 @@ Revisions advance automatically when logical content changes. Envelope fields
 `revision`, `observed_at`, `generated_at`, `emitted_at` and `run_id` do not count as
 logical changes. Meaningful timestamps belong inside `value`/`payload` or another
 business field such as `period_key`. Unchanged content retains the entire previous
-record and revision. Repeat an identical put safely. A changed unpublished value
-must be explicitly reconciled before replacement.
+record and revision. Repeat an identical put safely, or explicitly update a confirmation owned by
+this same run. Edits that differ from both main and the saved confirmation are
+preserved for reconciliation instead of being overwritten.
 
 ## Subscription conditions
 

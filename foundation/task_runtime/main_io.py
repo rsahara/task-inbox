@@ -190,7 +190,8 @@ def file_fingerprint(path):
         return None
     if not path.is_file():
         raise TaskError('Workspace changes must be regular files')
-    return [bool(path.stat().st_mode & 0o111), digest(path.read_bytes().hex())]
+    import hashlib
+    return [bool(path.stat().st_mode & 0o111), hashlib.sha256(path.read_bytes()).hexdigest()]
 
 
 def preserved_files(work):
@@ -199,6 +200,12 @@ def preserved_files(work):
                  ('ls-files', '--others', '--exclude-standard', '-z')]:
         paths.update(runtime.names(work, *args))
     return {path: file_fingerprint(work / path) for path in sorted(paths)}
+
+
+def clear_snapshot_pin(store, run):
+    ref = 'refs/task-runtime-snapshots/' + store.local.name + '/' + identity(run['task_id']) + '/' + identity(run['run_id'])
+    if git(store.repo, 'show-ref', '--verify', '--quiet', ref, predicate=True):
+        git(store.repo, 'update-ref', '-d', ref, run['source_head'])
 
 
 def merge_entry(store, path, base, current, submitted):

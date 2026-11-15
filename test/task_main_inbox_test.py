@@ -140,9 +140,10 @@ class MainInboxTest(RuntimeCase):
         self.assertEqual(self.git(work, 'rev-parse', 'HEAD'), head)
         self.assertEqual(signals.catalog(self.sa.snapshot(), 'source'), {})
         self.assertFalse(task_io.pending(self.sb, 'viewer')['messages'])
-        signals.put(self.sa, 'source', 'one', signal())
+        signals.put(self.sa, 'source', 'one', signal(value=2))
         self.finish('one')
         self.assertEqual(len(task_io.pending(self.sb, 'viewer')['messages']), 1)
+        self.assertEqual(task_io.pending(self.sb, 'viewer')['messages'][0]['payload']['signal']['value'], dict(count=2))
 
     def test_initial_policy_subscription_identity_and_failed_runs(self):
         self.run_source('one', [signal()]); self.finish('one')
@@ -213,6 +214,9 @@ class MainInboxTest(RuntimeCase):
         self.output(work, 'another.txt', b'untracked\n')
         runtime.prepare(self.sa, 'source', 'one', work, mode='workspace')
         self.output(work, 'tasks/source/data/output.txt', b'accepted\n')
+        self.git(work, 'add', 'tasks/source/data/output.txt')
+        self.git(work, 'commit', '-m', 'Explicit task commit', '--only', '--', 'tasks/source/data/output.txt')
+        self.output(work, 'tasks/source/data/later.txt', b'kept dirty until finish\n')
         head = self.git(work, 'rev-parse', 'HEAD')
         index = self.git(work, 'diff', '--cached')
         self.finish('one')

@@ -158,6 +158,9 @@ def collect_local(store, run):
         if marker.exists() and json.loads(marker.read_text()).get("phase") not in ("exited", "interrupted"):
             raise TaskError("Worker termination is unconfirmed; retain local files")
         if state['mode'] != 'worktree':
+            if run.get('main_inbox_protocol'):
+                from . import main_io
+                main_io.clear_snapshot_pin(store, run)
             remove_local_records(state_path)
             return 'executor_owned'
         work = Path(state["path"])
@@ -197,6 +200,9 @@ def collect_local(store, run):
             if "branch " + run["work_ref"] in git(store.repo, "worktree", "list", "--porcelain").splitlines():
                 raise TaskError("Local work branch is still checked out")
             git(store.repo, "update-ref", "-d", run["work_ref"], expected_head)
+        if run.get('main_inbox_protocol'):
+            from . import main_io
+            main_io.clear_snapshot_pin(store, run)
         remove_local_records(state_path)
         return "removed"
 

@@ -77,6 +77,12 @@ def read_value(snapshot, name):
 
 
 def put(store, task_id, run_id, value):
+    state = runtime.local_state(store, task_id, run_id)
+    with store.lock(state.with_suffix('.lock')):
+        return _put(store, task_id, run_id, value)
+
+
+def _put(store, task_id, run_id, value):
     value = validate(value, task_id)
     snapshot = store.snapshot()
     require_enabled(snapshot)
@@ -99,6 +105,7 @@ def put(store, task_id, run_id, value):
     if previous and previous['path'] != relative:
         relative = previous['path']
     old = previous['value'] if previous else None
+    prior_confirmation = local.get('confirmed_signals', {}).get(value['id'])
     if main_io.enabled(snapshot):
         from .store import Snapshot
         definition = Snapshot(store, run['definition_commit'])
@@ -120,7 +127,10 @@ def put(store, task_id, run_id, value):
     if target.is_symlink() or any(p.is_symlink() for p in target.parents if work in p.parents or p == work):
         raise TaskError('Signal path cannot follow symlinks')
     if target.exists() and target.read_bytes() not in (snapshot.read(relative), encode(value)):
-        raise TaskError('Preserve unpublished signal changes before replacing them')
+        own_confirmation = (main_io.enabled(snapshot) and prior_confirmation
+                            and digest(json.loads(target.read_text())) == prior_confirmation)
+        if not own_confirmation:
+            raise TaskError('Preserve unpublished signal changes before replacing them')
     atomic_json(target, value)
     if main_io.enabled(snapshot):
         atomic_json(state, local)
@@ -281,7 +291,16 @@ def read_notice(store, message, *, snapshot=None):
     """Read fixed v2 evidence, or resolve a legacy hint against the given main."""
     snapshot = snapshot or store.snapshot()
     value = message.get('payload', {})
+    if message.get('kind') != KIND or not isinstance(value, dict):
+        raise TaskError('Invalid signal notification')
     if value.get('schema_version') == 2:
+        identity(value.get('task_id'), 'source task ID')
+        identity(value.get('signal_id'), 'signal ID')
+        identity(value.get('subscription_id'), 'subscription ID')
+        if value.get('trigger') == 'run':
+            identity(value.get('run_id'), 'source run ID')
+        elif value.get('trigger') != 'change' or value.get('run_id') is not None:
+            raise TaskError('Invalid signal notification trigger')
         signal = validate(value.get('signal'), value.get('task_id'))
         if (signal['id'] != value.get('signal_id') or signal['revision'] != value.get('revision')
                 or value.get('trigger') not in ('change', 'run')
