@@ -160,6 +160,7 @@ def collect_local(store, run):
         if state['mode'] != 'worktree':
             if run.get('main_inbox_protocol'):
                 from . import main_io
+                preserve_work_history(store, run)
                 main_io.clear_snapshot_pin(store, run)
             remove_local_records(state_path)
             return 'executor_owned'
@@ -189,6 +190,8 @@ def collect_local(store, run):
             for path, entry in run["artifact_manifest"].items():
                 if not run.get('main_inbox_protocol') and source.entries.get(path) != (tuple(entry) if entry else None):
                     raise TaskError("Workspace does not match the accepted output")
+            if run.get('main_inbox_protocol'):
+                preserve_work_history(store, run)
             git(store.repo, "worktree", "remove", *(["--force"] if run.get("main_inbox_protocol") else []), str(work))
         elif registered:
             # A missing registered directory may be a disconnected mount.
@@ -199,12 +202,28 @@ def collect_local(store, run):
                 raise TaskError("Local work branch changed; retained")
             if "branch " + run["work_ref"] in git(store.repo, "worktree", "list", "--porcelain").splitlines():
                 raise TaskError("Local work branch is still checked out")
+            if run.get('main_inbox_protocol'):
+                preserve_work_history(store, run)
             git(store.repo, "update-ref", "-d", run["work_ref"], expected_head)
         if run.get('main_inbox_protocol'):
             from . import main_io
             main_io.clear_snapshot_pin(store, run)
         remove_local_records(state_path)
         return "removed"
+
+
+def preserve_work_history(store, run):
+    """Keep explicit worker commits reachable before collecting their branch."""
+    head = run.get('workspace_head')
+    if not head or store.contains(run['definition_commit'], head):
+        return
+    ref = 'refs/tags/task-work-history/' + identity(run['task_id']) + '/' + identity(run['run_id'])
+    actual = store.remote_tip(ref)
+    if actual is None:
+        store.push(ref, head, None)
+        actual = store.remote_tip(ref)
+    if actual != head:
+        raise TaskError('Worker history preservation is unconfirmed; retain the workspace')
 
 
 def remove_local_records(state_path):

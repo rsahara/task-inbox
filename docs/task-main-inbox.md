@@ -121,6 +121,10 @@ requires reconciliation. Newly changed files must stay within the admitted task'
 data/artifact boundary. Executor-owned directories are never automatically removed.
 Owned temporary worktrees are removed only after exact output and termination
 checks; unknown files or commits retain the workspace.
+Before collection, explicit worker commits are preserved remotely under
+`refs/tags/task-work-history/<task-id>/<run-id>`. These history tags are retained
+independently of disposable run refs and metadata. Reverting an earlier published
+file, or deleting a published new file, is captured by the next publish/finish.
 
 Use `run finish --input-results-file results.json` with an object mapping captured
 message IDs to verified result objects, e.g. `{"request-1":{"status":"succeeded"}}`.

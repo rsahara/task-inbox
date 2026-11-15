@@ -750,13 +750,28 @@ def _publish(store, operation_id, task_id, run_id, *, outcome=None, summary="", 
                          "source_head": run["source_head"], "artifacts": run["artifact_manifest"], "finished_at": run["finished_at"],
                          **({"completion": run["completion"]} if run.get("completion_contract") else {})})
                 from . import maintenance
-                for path, entry in preparation.get('cleanup', {}).get('io_manifest', {}).items():
+                cleanup_preparation = dict(preparation)
+                if authority_inbox and 'cleanup' in preparation:
+                    # Events may arrive after finish preparation or during a CAS
+                    # retry. Freeze the final manifest with terminal authority.
+                    io_prefix = run_path(task_id, run_id, snapshot) + '/io/'
+                    manifest = {p[len(io_prefix):]: e for p, e in snapshot.entries.items()
+                                if p.startswith(io_prefix)}
+                    for path, entry in preparation['cleanup']['io_manifest'].items():
+                        if path in manifest and manifest[path] != tuple(entry):
+                            raise TaskError('Previously saved run I/O record changed')
+                        manifest[path] = entry
+                    if manifest and CONTROL + '/config.json' not in manifest:
+                        stream = task_io.IOStore(store, task_id, run)
+                        manifest[CONTROL + '/config.json'] = store.blob(encode(stream.manifest))
+                    cleanup_preparation['cleanup'] = dict(preparation['cleanup'], io_manifest=manifest)
+                for path, entry in cleanup_preparation.get('cleanup', {}).get('io_manifest', {}).items():
                     target = run_path(task_id, run_id, snapshot) + '/io/' + path
                     if snapshot.entries.get(target) not in (None, tuple(entry)):
                         raise TaskError('Previously saved run I/O record changed')
                     changes[target] = entry
                 changes[run_path(task_id, run_id, snapshot) + "/cleanup.json"] = encode(
-                    maintenance.finish_record(run, operation_id, preparation, discard_output))
+                    maintenance.finish_record(run, operation_id, cleanup_preparation, discard_output))
                 if discard_output:
                     from . import reports
                     changes.update(reports.retained_changes(run, run_path(task_id, run_id, snapshot),

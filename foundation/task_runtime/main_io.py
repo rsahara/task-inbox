@@ -147,7 +147,10 @@ def workspace_snapshot(store, task_id, run_id, state, run, *, include_signals=Tr
         raise TaskError('Workspace is not prepared for this run')
     if not git(work, 'merge-base', '--is-ancestor', run['definition_commit'], 'HEAD', predicate=True):
         raise TaskError('Workspace definition ancestry changed')
-    paths = set()
+    # Publication advances source_head, while the worker HEAD stays fixed. A
+    # restored/deleted output can therefore be clean against HEAD but changed
+    # against the last accepted snapshot.
+    paths = set(run.get('artifact_manifest', {}))
     for commit in git(work, 'rev-list', run['definition_commit'] + '..HEAD').splitlines():
         paths.update(runtime.names(work, 'diff-tree', '--no-commit-id', '--name-only',
                                    '--no-renames', '-r', '-z', commit))

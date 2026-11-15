@@ -4,7 +4,7 @@ import sys
 from unittest.mock import patch
 
 from task_runtime_test import ROOT, RuntimeCase
-from task_runtime import lifecycle, main_io, runtime, signals, task_io
+from task_runtime import lifecycle, main_io, maintenance, runtime, signals, task_io
 from task_runtime.store import GitFailure, TaskError, encode, git
 
 
@@ -139,6 +139,54 @@ class MainInboxTest(RuntimeCase):
         self.assertIsNotNone(snap.read('tasks/source/data/accepted.txt'))
         self.assertIsNone(snap.read('tasks/source/data/unadopted.txt'))
         self.assertTrue((work / 'tasks/source/data/unadopted.txt').exists())
+
+    def test_finish_captures_restored_and_deleted_published_files(self):
+        name = 'tasks/source/data/existing.txt'
+        new = 'tasks/source/data/new.txt'
+        self.sa.transact('seed', dict(kind='fixture'), lambda s: ({name: b'original\n'}, {}))
+        work = self.run_source('reverted', [])
+        self.output(work, name, b'intermediate\n')
+        self.output(work, new)
+        runtime.publish(self.sa, 'intermediate', 'source', 'reverted')
+        self.output(work, name, b'original\n')
+        (work / new).unlink()
+        self.assertFalse(self.git(work, 'status', '--porcelain'))
+        self.finish('reverted')
+        self.assertEqual(self.sb.snapshot().read(name), b'original\n')
+        self.assertIsNone(self.sb.snapshot().read(new))
+        self.assertFalse(work.exists())
+
+    def test_cleanup_preserves_explicit_commit_history_in_remote_tag(self):
+        work = self.run_source('committed', [])
+        self.output(work, 'tasks/source/data/output.txt')
+        self.git(work, 'add', '.')
+        self.git(work, 'commit', '-m', 'Explicit output history')
+        self.git(work, 'commit', '--allow-empty', '-m', 'Explicit empty checkpoint')
+        head = self.git(work, 'rev-parse', 'HEAD')
+        self.finish('committed')
+        self.assertFalse(work.exists())
+        ref = 'refs/tags/task-work-history/source/committed'
+        self.assertEqual(self.sa.remote_tip(ref), head)
+        self.git(self.b, 'fetch', 'origin', ref)
+        self.assertEqual(self.git(self.b, 'rev-parse', 'FETCH_HEAD'), head)
+        self.assertEqual(self.git(self.b, 'log', '-2', '--format=%s', head).splitlines(),
+                         ['Explicit empty checkpoint', 'Explicit output history'])
+        self.assertFalse(self.git(self.a, 'rev-list', '--merges', self.sa.fetch()))
+
+    def test_finish_manifest_includes_authority_events_with_and_without_heartbeat(self):
+        for heartbeat in (False, True):
+            rid = 'events-' + str(heartbeat).lower()
+            work = self.run_source(rid, [])
+            if heartbeat:
+                runtime.heartbeat(self.sa, 'source', rid)
+            task_io.emit(self.sa, 'emit-' + rid, 'source', rid, 'intent', 'external-intent', {})
+            with patch.object(maintenance, 'maintain'):
+                self.finish(rid)
+            run = runtime.load_run(self.sa.snapshot(), 'source', rid)[2]
+            saved = task_io.IOStore(self.sa, 'source', run).optional()
+            self.assertEqual(saved.json('events/intent.json')['id'], 'intent')
+            self.assertEqual(maintenance.collect(self.sa, 'source', rid, apply=True)['status'], 'done')
+            self.assertFalse(work.exists())
 
     def test_required_output_and_type_contract(self):
         runtime.edit_task(self.sa, 'required', 'source', 1, interface=interface(True))
