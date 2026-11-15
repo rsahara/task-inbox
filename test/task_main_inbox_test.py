@@ -4,7 +4,7 @@ import sys
 from unittest.mock import patch
 
 from task_runtime_test import ROOT, RuntimeCase
-from task_runtime import main_io, runtime, signals, task_io
+from task_runtime import lifecycle, main_io, runtime, signals, task_io
 from task_runtime.store import GitFailure, TaskError, encode, git
 
 
@@ -91,6 +91,29 @@ class MainInboxTest(RuntimeCase):
         self.finish('one')
         self.assertFalse(task_io.pending(self.sb, 'source')['messages'])
         self.assertEqual(self.finish('one')['status'], 'succeeded')
+
+    def test_common_supervisor_allows_verified_finish_and_rejects_an_unknown_relaunch(self):
+        definition = runtime.load_task(self.sa.snapshot(), 'source')[0]
+        definition['execution']['heartbeat_seconds'] = 1
+        self.sa.transact('fast-heartbeat', dict(kind='fixture'),
+                         lambda snapshot: ({'tasks/source/task.json': encode(definition)}, {}))
+        self.run_source('one', [])
+        child = self.base / 'finishing-worker.py'
+        done = self.base / 'worker-exited'
+        child.write_text('import sys,time\nfrom pathlib import Path\n'
+            + 'sys.path.insert(0, ' + repr(str(ROOT / 'foundation')) + ')\n'
+            + 'from task_runtime import runtime\nfrom task_runtime.store import Store\n'
+            + 'runtime.publish(Store(' + repr(str(self.a)) + '), "child-finish", "source", "one", outcome="succeeded")\n'
+            + 'time.sleep(1.5)\nPath(' + repr(str(done)) + ').touch()\n')
+        result = lifecycle.execute(self.sa, 'source', 'one', [sys.executable, str(child)], worker_finish=True)
+        self.assertEqual(result['exit_code'], 0)
+        self.assertTrue(done.exists())
+        self.run_source('two', [])
+        with patch.object(runtime, 'heartbeat', side_effect=TaskError('ownership lost')):
+            with self.assertRaisesRegex(TaskError, 'ownership lost'):
+                lifecycle.execute(self.sa, 'source', 'two', [sys.executable, '-c', 'raise AssertionError("launched")'], worker_finish=True)
+        with self.assertRaisesRegex(TaskError, 'already launched'):
+            lifecycle.execute(self.sa, 'source', 'two', [sys.executable, '-c', 'raise AssertionError("relaunched")'], worker_finish=True)
 
     def test_heartbeat_and_finish_do_not_commit_worker_files_or_merge_history(self):
         work = self.run_source('one', [])

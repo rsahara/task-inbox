@@ -150,7 +150,12 @@ renew their authority fence; those ownership operations are not business snapsho
 4. Verify schema 11, pending messages and the new host inbox watcher, then resume
    only authorized schedules. Older runtime versions reject schema 11.
 
-The caller owns triggers, credentials, model selection and reconciliation.
+The caller owns triggers, credentials, model selection and reconciliation. The
+common `lifecycle.execute` supervisor supplies the durable single-launch claim,
+heartbeat and process-group termination. A trusted caller may set
+`worker_finish=True` when its worker owns finish; only a verified successful
+completion permits the existing child to exit normally after slot release.
+Unknown launch claims are never relaunched automatically.
 `execute` accepts exactly one task. `--continue` and `--max-tasks` are removed.
 A watcher should inspect durable pending work on inbox updates and slot release,
 so an arrival during an occupied slot is retried after finish. A lost startup event
