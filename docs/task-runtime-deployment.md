@@ -32,7 +32,9 @@ timed policy by asserting capabilities that the environment does not implement.
 
 For effects, distinguish immutable computation output, durable delivery requests,
 and accepted publication. Main owns slots/generations and accepted pointers;
-inbox/run streams retain requests, progress, intents and candidate results.
+schema 11 keeps requests, intents and accepted input results on main, with
+isolated heartbeat progress. Legacy inbox/run branches retain requests, events
+and result candidates until migration.
 `io complete` accepts a result only under current authority. Git push does not itself
 guarantee another executor will start: existing invocations must check pending
 work and wake the consumer. No additional scheduler or daemon is required.

@@ -1,12 +1,19 @@
 # Portable Git task runtime v2
 
-Version 2.13 adds [portable task interfaces and `execute`](task-execution.md),
-one caller entrypoint for checking conditions, supervised execution and explicitly
-bounded continuation. Task business logic remains independent of its execution
-host and output consumers. Individual `run`/`io wake` commands remain supported.
+Version 2.14 adds [schema 11 main inboxes](task-main-inbox.md): explicit migration,
+atomic output/input-result/finish/notification commits and declared signal IDs.
+Heartbeat history stays on a separate run stream. Existing schema 9/10 storage
+remains supported until migration.
 
-Version 2.10 unifies every heartbeat, event, and result in [task I/O](task-io.md).
-The old heartbeat writer and per-task enable command are removed.
+[Portable task interfaces and `execute`](task-execution.md) provide one caller
+entrypoint for checking conditions and supervising one task per invocation.
+The caller independently invokes subsequent tasks. Task business logic remains
+independent of its execution host and output consumers. Individual `run`/`io wake`
+commands remain supported.
+
+Version 2.10 introduced unified [task I/O](task-io.md); schema 11 moves business
+events and accepted results to main while retaining the isolated heartbeat ref.
+The old heartbeat writer and per-task enable command remain removed.
 
 Version 2.9 adds [retained-resource reports](task-runtime-reports.md) and a read-only
 `run report` inventory, including local leftovers of retired terminal records.
@@ -145,7 +152,13 @@ tasks/<task-id>/runs/<run-id>/artifacts/**
 tasks/<task-id>/runs/<run-id>/cleanup.json
 ```
 
-Schema 9 keeps normal terminal status, summary, artifact manifest, source, finish time and completion evidence in `run.json`. `run show` reads it from the current tree or ordinary history after cleanup. Slots retain only run ID and generation; owner/machine remain on the run. Shared-data conflict detection uses the pinned content hash. See [interface and migration decisions](task-runtime-slim.md).
+Schemas 9 and later keep normal terminal status, summary, artifact manifest,
+source, finish time and completion evidence in `run.json`. `run show` reads it
+from the current tree or ordinary history after cleanup. Slots retain only run
+ID and generation; owner/machine remain on the run. Legacy shared-data conflict
+detection uses the pinned content hash; schema 11 uses three-way content merging.
+See [interface and migration decisions](task-runtime-slim.md) and the
+[main inbox contract](task-main-inbox.md).
 
 Metadata uses JSON so the tool needs no YAML package. Each task has a definition
 revision. Task status is `open`, `paused`, `completed`, `cancelled`, or `deleted`.
@@ -214,8 +227,10 @@ heartbeat runs with their original runtime before upgrading; old binaries cannot
 prepare or write a schema-9 authority. Historical run records remain readable.
 
 `--mode workspace` uses an executor-provisioned checkout. Use `--repo` pointing to
-that checkout, initially clean at the run's pinned definition commit. No primary
-checkout or nested integration worktree is needed. Its reservation cannot be
+that checkout at the run's pinned definition commit. Under schema 11,
+pre-existing dirty files are preserved and excluded from publication; subsequent
+edits to those files require reconciliation. Legacy storage requires a clean
+checkout. No primary checkout or nested integration worktree is needed. Its reservation cannot be
 reused while the previous run is unfinished. The tool never deletes an executor
 workspace.
 
@@ -247,8 +262,9 @@ stopped. External side effects require their own cancellation/idempotency/fencin
 publishes output, records a result and releases the slot in one authority commit.
 The allowed write areas are `tasks/<id>/data/**` and that run's `artifacts/**`.
 Task definitions and ownership files are edited through management operations.
-The entire source history and pending/untracked files are checked; forbidden
-intermediate edits, merges, symlinks and submodules are rejected. Binary bytes,
+The source history and pending/untracked files are checked; edits crossing the
+task/run boundary, symlinks and submodules are rejected. Schema 11 also captures
+allowed output introduced by explicit merge commits. Binary bytes,
 file modes and deletions are preserved as Git objects.
 
 Publication and normal finish require a prepared/restored local workspace, even
@@ -259,8 +275,16 @@ checkpoint after confirming the old writer stopped and pending operations
 settled. The explicit failed/cancelled `--discard-output` path below is the only
 way to finish without a workspace or adoptable source; it retains recovery data.
 
-All shared data is conservatively treated as a read dependency. If it changes
-since this run's baseline/last publication, recompute in a new run; Git's ability
+Under schema 11, concurrent task-data updates use three-way content merging;
+conflicts retain ownership for reconciliation. Generation/ownership fencing is
+checked independently in the same authority CAS. Successful finish can accept
+captured input results with `--input-results-file` and atomically save signal
+notifications. Intermediate publication does not deliver signals. See the
+[main inbox contract](task-main-inbox.md).
+
+Before schema 11 migration, all shared data is conservatively treated as a read
+dependency. If it changes since this run's baseline/last publication, recompute
+in a new run; Git's ability
 to merge different lines is not a semantic validation. Independent run artifacts
 can publish concurrently when their shared data baseline remains valid. Published
 artifacts are verified at the accepted immutable commit; legitimate later updates
@@ -311,20 +335,25 @@ The shared Git runner keeps automatic maintenance in the foreground without
 changing repository/global settings. Executors still need an init/reaper for
 orphaned descendants; see [process ownership and Git maintenance](task-runtime-processes.md).
 
-[Task I/O](task-io.md) is used by every run for heartbeats, immutable events/results,
-and generation-checked acknowledgements on main. Task inboxes accept requests
-without a per-task enable step. Detailed progress is never execution authority.
+[Task I/O](task-io.md) is used by every run. Schema 11 stores inbox messages,
+immutable business events and accepted results on main, with isolated heartbeats.
+Task inboxes accept requests without a per-task enable step. Detailed progress
+is never execution authority.
 
-The runtime uses two run refs:
+The runtime reserves these run refs; schema 11 does not automatically publish
+work checkpoints:
 
 ```text
 refs/heads/task-io/<task-id>/runs/<run-id>
 refs/heads/task-runtime/<task-id>/<run-id>/work
 ```
 
-The run I/O stream contains `state.json`, events, and results; it is never merged
-into main. Heartbeat state stores run identity, generation, sequence, display
-timestamp, and optional progress. `work` checkpoints the actual work history before publication.
+The schema 11 run stream contains heartbeat `state.json` and its manifest;
+legacy streams also contain events and result candidates. Stream history is
+never merged into main. Heartbeat state stores run identity, generation,
+sequence, display timestamp and optional progress. Explicit remote `work`
+checkpoints retain work history for recovery. Schema 11 publish/finish snapshots
+business files without changing the worker's HEAD or index.
 Heartbeat liveness and useful work progress are different signals.
 
 Defaults are a 60-second heartbeat and a 300-second unchanged-ref threshold.
@@ -460,7 +489,10 @@ The CLI intentionally has no automatic live legacy migration.
 Legacy import and service-specific rollout belong to the consuming repository.
 This package does not inspect task numbers, legacy lock names or service dispatch.
 Existing repositories keep their paths. First admission after the coordinated
-runtime upgrade moves an idle authority to schema 9; older writers reject it.
+runtime upgrade moves earlier idle authorities to schema 9; it does not enable
+schema 11. For main inboxes, use the explicit
+[schema 11 migration](task-main-inbox.md#migration-and-host-integration), which
+imports legacy messages and preserves receipts and old refs after writer drain.
 There is no live layout migration command.
 
 ## Validation

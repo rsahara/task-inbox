@@ -10,6 +10,12 @@ or archive tag is introduced.
 
 ## Durable completion and disposable resources
 
+With [schema 11](task-main-inbox.md), inbox messages and accepted input receipts
+stay on main. Run events are already authority records; normal finish freezes
+them with the last isolated heartbeat checkpoint in the run's `io/` manifest.
+Heartbeat history is not merged into main. Migration preserves legacy inbox
+branches; normal run cleanup does not delete them.
+
 In schema 9, `run.json` is the normal run-result source, with no duplicate `result.json`; recovery and checkpoint-delivery results retain their distinct evidence. Operation receipts preserve historical responses. The finish transaction records the result, releases the slot, and writes a
 version-2 `cleanup.json` alongside its usual operation receipt. That manifest is
 an immutable deletion authorization, not a mutable cleanup progress counter.
@@ -55,9 +61,14 @@ observed local tip, preserves changed or unprovable histories, and requires the
 normal remote-target and durable I/O checks. Coordinator fetches do not refresh
 the caller's configured tracking refs merely to make cleanup pass.
 
-The default preserves accepted artifacts/results, not every intermediate source
-commit or raw execution log. Save required diagnostics as run artifacts before
-finish. No new archive tag is created. Removing refs does not immediately remove
+Save required diagnostics as run artifacts before finish; raw execution logs
+remain local. Schema 11 also preserves explicit worker commits under
+`refs/tags/task-work-history/<task-id>/<run-id>` before workspace collection.
+Histories touching protected pre-existing files stay local; other histories
+are also retained remotely. These tags are independent of disposable run refs
+and metadata. See [workspace preservation](task-main-inbox.md#workspace-and-io).
+Legacy storage preserves accepted artifacts/results without archiving every
+intermediate source commit. Removing refs does not immediately remove
 Git objects; host/local Git GC still determines physical object retention.
 
 ## Normal entry points and interruptions
@@ -91,8 +102,11 @@ machine can access the recorded checkout.
 
 Only a recorded runtime-owned linked worktree is removed. Repository identity,
 run generation, symbolic branch, source HEAD, accepted artifact manifest and
-absence of staged/unstaged/untracked/ignored files are checked. The invoking
-checkout and current working directory are retained. A later call from a
+workspace contents are checked. Schema 11 permits dirty files only when they
+exactly match the accepted publication snapshot, and preserves explicit worker
+commit history before collection. Unknown or unpreserved files retain the
+workspace. Legacy collection requires no staged/unstaged/untracked/ignored files.
+The invoking checkout and current working directory are retained. A later call from a
 surviving checkout can remove them. Executor-owned workspaces and reservations
 remain owned by the executor; their terminal runtime sidecars are removed after
 confirmed process termination.

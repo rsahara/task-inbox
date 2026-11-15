@@ -10,8 +10,10 @@ transports and manual tasks retain the behavior described below.
 Only transport and executor integrations vary. Version 2.1 adds an installed
 transport executable and explicit recovery diagnostics; it does **not** add a
 hosted-service dependency, a remote lease, a scheduler or a production API adapter.
-Runtime 2.11 uses authority schema 9 for unified I/O and transient execution metadata; individual
-run records remain version 2. Keep each repository's writers on a compatible
+Runtime 2.14 supports schema 11 main inboxes and atomic finish/fanout after
+[explicit migration](task-main-inbox.md#migration-and-host-integration).
+Schema 9/10 repositories retain legacy I/O until migration; individual run
+records remain version 2. Keep each repository's writers on a compatible
 runtime and adapter version. Authority object imports must include complete
 ancestry so retired execution records can be read from ordinary Git history.
 

@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1060" height="500" viewBox="0 0 1060 500" role="img" aria-labelledby="title description">
   <title id="title">task-inbox: responsibilities and storage</title>
-  <desc id="description">The caller owns the execution host, Codex session prompt, tools and local state. task-inbox supplies coordination; the task worker follows task.md. Shared Git survives sessions. Its main branch contains task definitions, task data, output signals and ownership records. Separate task-io branches contain the inbox and run I/O, including heartbeat. TASK and RUN are placeholders for IDs.</desc>
+  <desc id="description">The caller owns the execution host, Codex session prompt, tools and local state. task-inbox supplies coordination; the task worker follows task.md. Shared Git survives sessions. With schema 11, its main branch contains task definitions, task data, output signals, inbox messages, accepted receipts, ownership records and run events. A separate task-io run branch isolates heartbeat history. TASK and RUN are placeholders for IDs.</desc>
   <!-- Keep this layout fixed and labels short. Full paths and retention rules are in README.md. -->
   <style>
     text { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; fill: #172d3b; font-size: 18px; }
@@ -54,12 +54,12 @@
     <text class="heading" x="408" y="46">Shared Git / survives sessions</text>
 
     <g id="main-branch" aria-label="Main authority branch">
-      <rect class="main" x="408" y="64" width="618" height="246" rx="9"/>
+      <rect class="main" x="408" y="64" width="618" height="316" rx="9"/>
       <text class="label" x="424" y="90">main</text>
-      <text class="small" x="482" y="90">authority branch</text>
+      <text class="small" x="482" y="90">authority branch · schema 11</text>
 
       <g id="task-directory" aria-label="Task directory on main">
-        <rect class="directory" x="424" y="104" width="586" height="190" rx="7"/>
+        <rect class="directory" x="424" y="104" width="586" height="258" rx="7"/>
         <text class="code" x="440" y="130">tasks/TASK/</text>
 
         <rect class="task" x="440" y="142" width="268" height="80" rx="6"/>
@@ -68,8 +68,8 @@
         <text class="small" x="454" y="210">agent config · prompts · scripts</text>
 
         <rect class="runtime" x="440" y="232" width="268" height="50" rx="6"/>
-        <text x="454" y="253">Run ownership</text>
-        <text class="small" x="454" y="274">runtime.json · accepted receipts</text>
+        <text x="454" y="253">Ownership + receipts</text>
+        <text class="small" x="454" y="274">runtime.json · io/receipts/*</text>
 
         <g id="task-data" aria-label="Task-owned permanent data and output signals">
           <rect class="task" x="720" y="142" width="274" height="140" rx="6"/>
@@ -81,24 +81,27 @@
           <text x="746" y="230">Signals (output)</text>
           <text class="code" x="746" y="254">signals/*.json</text>
         </g>
+
+        <g id="task-inbox" aria-label="Incoming requests on main">
+          <rect class="runtime" x="440" y="292" width="268" height="58" rx="6"/>
+          <text class="label" x="454" y="316">Inbox messages</text>
+          <text class="code" x="454" y="339">io/inbox/messages/*</text>
+        </g>
+
+        <g id="run-events" aria-label="Immutable run events on main">
+          <rect class="runtime" x="720" y="292" width="274" height="58" rx="6"/>
+          <text class="label" x="734" y="316">Run events</text>
+          <text class="code" x="734" y="339">runs/RUN/io/events/*</text>
+        </g>
       </g>
     </g>
 
-    <g id="inbox-branch" aria-label="Inbox branch in shared Git">
-      <rect class="runtime" x="408" y="326" width="302" height="142" rx="9"/>
-      <text class="label" x="424" y="355">Inbox branch</text>
-      <text class="code" x="424" y="386">task-io/TASK/inbox</text>
-      <text class="code" x="424" y="416">messages/*</text>
-      <text class="small" x="424" y="446">Incoming requests</text>
-    </g>
-
-    <g id="run-io-branch" aria-label="Run I/O branch in shared Git including heartbeat">
-      <rect class="runtime" x="724" y="326" width="302" height="142" rx="9"/>
-      <text class="label" x="740" y="355">Run I/O branch</text>
-      <text class="code" x="740" y="386">task-io/TASK/runs/RUN</text>
-      <text class="code" x="740" y="416">state.json</text>
-      <text class="small" x="858" y="416">heartbeat</text>
-      <text class="small" x="740" y="446">events/* · results/*</text>
+    <g id="heartbeat-branch" aria-label="Separate heartbeat run branch in shared Git">
+      <rect class="runtime" x="408" y="394" width="618" height="74" rx="9"/>
+      <text class="label" x="424" y="421">Heartbeat run branch</text>
+      <text class="code" x="424" y="448">task-io/TASK/runs/RUN</text>
+      <text class="code" x="710" y="448">state.json</text>
+      <text class="small" x="826" y="448">isolated history</text>
     </g>
   </g>
 </svg>
