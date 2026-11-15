@@ -276,7 +276,8 @@ def emit(store, operation_id, task_id, run_id, event_id, kind, payload):
             if previous is not None and previous != event:
                 raise TaskError('Run event ID already used with different content')
             return ({path: encode(event)} if previous is None else {}), event
-        return store.transact(operation_id, dict(kind='io-emit', event=event), accept)
+        return store.transact(operation_id, dict(kind='run-io-emit', task_id=task_id, run_id=run_id,
+                                                generation=run['generation'], event=event), accept)
     stream = IOStore(store, task_id, run)
     stream.ensure()
     path = 'events/' + event_id + '.json'
