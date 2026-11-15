@@ -56,6 +56,31 @@ def complete_changes(snapshot, task_id, run, results):
     return changes
 
 
+def stage_results(store, task_id, run_id, results):
+    """Locally confirm captured input results for the atomic finish transaction."""
+    import json
+    snapshot = store.snapshot()
+    if not enabled(snapshot):
+        raise TaskError('Deferred input results require main inbox storage')
+    state_path = runtime.local_state(store, task_id, run_id)
+    with store.lock(state_path.with_suffix('.lock')):
+        run = runtime.check(store, task_id, run_id)
+        # Validate message existence, result bounds and prior accepted receipts now,
+        # then repeat that validation inside the final authority transaction.
+        complete_changes(snapshot, task_id, run, results)
+        state = json.loads(state_path.read_text())
+        if not state.get('prepared') or state['generation'] != run['generation']:
+            raise TaskError('Prepare the run before staging input results')
+        staged = state.setdefault('input_results', {})
+        for mid, value in results.items():
+            if mid in staged and staged[mid] != value:
+                raise TaskError('Captured input result already staged with different content')
+            staged[mid] = value
+        from .store import atomic_json
+        atomic_json(state_path, state)
+    return dict(staged=len(results), accepted=False)
+
+
 def migrate(store, operation_id, *, drained=False, subscriptions=None):
     """Import immutable old inboxes after explicit, repository-wide writer drain."""
     from . import task_io
@@ -200,7 +225,7 @@ def merge_entry(store, path, base, current, submitted):
 
 
 def verify_saved_workspace(store, run, work):
-    """Only discard dirty files whose exact bytes were accepted on main."""
+    """Only discard dirty files matching the submitted, accepted snapshot."""
     paths = set()
     for args in [('diff', '--name-only', '-z'), ('diff', '--cached', '--name-only', '-z'),
                  ('ls-files', '--others', '--exclude-standard', '-z'),
@@ -216,6 +241,6 @@ def verify_saved_workspace(store, run, work):
         current = store.blob(target.read_bytes()) if target.is_file() else None
         if current and target.stat().st_mode & 0o111:
             current = ('100755', *current[1:])
-        expected = run['artifact_manifest'].get(name, source.entries.get(name))
+        expected = source.entries.get(name)
         if current != (tuple(expected) if expected else None):
             raise TaskError('Workspace contains unpreserved files')

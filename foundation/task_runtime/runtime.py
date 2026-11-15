@@ -619,6 +619,8 @@ def _publish(store, operation_id, task_id, run_id, *, outcome=None, summary="", 
     operation_path = store.local / "publications" / (identity(operation_id) + ".json")
     from . import main_io
     authority_inbox = main_io.enabled(store.snapshot())
+    if input_results is not None and not authority_inbox:
+        raise TaskError('Bundled input results require main inbox storage')
     with store.lock(state_path.with_suffix(".lock")):
         receipt = store.snapshot().metadata(CONTROL + "/operations/" + operation_id + ".json")
         if receipt:
@@ -713,8 +715,10 @@ def _publish(store, operation_id, task_id, run_id, *, outcome=None, summary="", 
                     preparation.get('local_confirmation', {}))
                 changes.update(notifications)
                 run['notifications_saved'] = count
-                if input_results is not None:
-                    changes.update(main_io.complete_changes(snapshot, task_id, run, input_results))
+                if outcome:
+                    results = input_results if input_results is not None else (
+                        preparation.get('local_confirmation', {}).get('input_results', {}) if outcome == 'succeeded' else {})
+                    changes.update(main_io.complete_changes(snapshot, task_id, run, results))
                 run['workspace_head'] = preparation.get('workspace_head')
                 run['main_inbox_protocol'] = 1
             updated = dict(snapshot.entries)

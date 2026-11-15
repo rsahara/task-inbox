@@ -122,7 +122,11 @@ checks; unknown files or commits retain the workspace.
 
 Use `run finish --input-results-file results.json` with an object mapping captured
 message IDs to verified result objects, e.g. `{"request-1":{"status":"succeeded"}}`.
-The statuses are `succeeded`, `failed` and `superseded`. Completion is explicit;
+The Python `main_io.stage_results` API can defer verified results locally; default
+successful finish accepts that frozen set atomically. Intermediate publication,
+failed and cancelled finishes leave deferred results pending. Explicit finish
+results can also report a verified failure. The statuses are `succeeded`, `failed`
+and `superseded`. Completion is explicit;
 finish never automatically acknowledges all pending messages. Late arrivals remain
 pending for another caller. `io send`, `io emit` and `io complete` remain explicit
 mid-run authority transactions for durable external-operation intents and results.

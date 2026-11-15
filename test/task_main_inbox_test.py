@@ -78,6 +78,19 @@ class MainInboxTest(RuntimeCase):
         self.assertFalse(task_io.pending(self.sb, 'source')['messages'])
         self.assertEqual(len(task_io.pending(self.sb, 'viewer')['messages']), 1)
 
+    def test_staged_input_results_remain_pending_until_successful_finish(self):
+        task_io.send(self.sa, 'request', 'source', 'input', 'work', {})
+        self.run_source('one', [])
+        before = self.sa.fetch()
+        main_io.stage_results(self.sa, 'source', 'one', {'input': {'status': 'succeeded'}})
+        self.assertEqual(self.sa.fetch(), before)
+        self.assertTrue(task_io.pending(self.sb, 'source')['messages'])
+        runtime.publish(self.sa, 'save', 'source', 'one')
+        self.assertTrue(task_io.pending(self.sb, 'source')['messages'])
+        self.finish('one')
+        self.assertFalse(task_io.pending(self.sb, 'source')['messages'])
+        self.assertEqual(self.finish('one')['status'], 'succeeded')
+
     def test_heartbeat_and_finish_do_not_commit_worker_files_or_merge_history(self):
         work = self.run_source('one', [])
         self.output(work, 'tasks/source/data/report.txt')
