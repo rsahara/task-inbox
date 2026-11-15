@@ -3,7 +3,7 @@ import copy
 import fnmatch
 import re
 
-from .store import TaskError
+from .store import TaskError, identity
 
 
 def strings(value, label):
@@ -35,8 +35,9 @@ def validate(value):
                 raise TaskError('Invalid declared output signal')
             if output.get('required') and '*' in output['id']:
                 raise TaskError('Required signals need an exact ID')
-            if not re.fullmatch(r'[a-z0-9][a-z0-9_.-]*\*?[a-z0-9_.-]*', output['id']):
+            if not re.fullmatch(r'[a-z0-9][a-z0-9_-]*\*?[a-z0-9_-]*', output['id']):
                 raise TaskError('Output signal IDs use lowercase identities and at most one wildcard')
+            identity(output['id'].replace('*', ''), 'Output signal ID')
             if 'value_schema' in output:
                 from .store import safe_path
                 safe_path(output['value_schema'])

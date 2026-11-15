@@ -451,18 +451,23 @@ def prepare(store, task_id, run_id, path, mode="worktree", *, restore=False, sto
             record_workspace_preparation(store, task_id, run_id, run, old, state_path)
             return old
         start_head = run["definition_commit"]
+        from . import main_io
         if restore:
             if not stopped or not settled:
                 raise TaskError("Restore requires confirmation that the previous writer/children stopped and operations settled")
+            authority_inbox = main_io.enabled(store.snapshot())
             start_head = store.fetch(run["work_ref"], missing=True)
-            if not start_head or not store.contains(start_head, run["source_head"]):
+            ancestor = run['definition_commit'] if authority_inbox else run['source_head']
+            if not start_head or not store.contains(start_head, ancestor):
                 raise TaskError("No compatible remote work checkpoint to restore")
-            if git(store.repo, "rev-list", "--merges", run["definition_commit"] + ".." + start_head):
+            if not authority_inbox and git(store.repo, "rev-list", "--merges", run["definition_commit"] + ".." + start_head):
                 raise TaskError("Checkpoint contains unsupported merge history")
             for commit in git(store.repo, "rev-list", run["definition_commit"] + ".." + start_head).splitlines():
-                paths = names(store.repo, "diff-tree", "--no-commit-id", "--name-only", "--no-renames", "-r", "-z", commit)
+                paths = names(store.repo, "diff-tree", "--no-commit-id", "--name-only", "--no-renames", "-m", "-r", "-z", commit)
                 if any(not allowed(task_id, run_id, p, run) for p in paths):
                     raise TaskError("Checkpoint crosses the run boundary")
+            if authority_inbox:
+                main_io.published_source(store, run)
         elif not old and (run["publication_count"] or store.remote_tip(run["work_ref"])):
             raise TaskError("A remote checkpoint exists; use restore after confirming the old writer stopped")
         state = old or {"path": str(path), "mode": mode, "task_id": task_id, "run_id": run_id,
@@ -682,8 +687,12 @@ def _publish(store, operation_id, task_id, run_id, *, outcome=None, summary="", 
                     preparation['cleanup']['work_head'] = store.remote_tip(run['work_ref'])
             atomic_json(operation_path, preparation)
         source = Snapshot(store, preparation["source_head"])
-        baseline = (source if authority_inbox and discard_output else
-                    Snapshot(store, preparation["previous_source"]))
+        if authority_inbox:
+            previous_run = dict(load_run(store.snapshot(), task_id, run_id)[2],
+                                source_head=preparation['previous_source'])
+            baseline = source if discard_output else main_io.published_source(store, previous_run)
+        else:
+            baseline = Snapshot(store, preparation["previous_source"])
         def apply(snapshot):
             task, runtime, run = load_run(snapshot, task_id, run_id, live=True)
             if run["generation"] != preparation["generation"] or run["source_head"] != preparation["previous_source"]:
@@ -734,6 +743,8 @@ def _publish(store, operation_id, task_id, run_id, *, outcome=None, summary="", 
                     updated[path] = entry
             run["data_hash"] = digest({p: (store.blob(e) if isinstance(e, bytes) else e) for p, e in updated.items() if p.startswith(data_prefix(run, task_id))})
             run["source_head"] = preparation["source_head"]
+            if authority_inbox and not discard_output:
+                changes.update(main_io.source_changes(store, snapshot, run, source))
             run['workspace_history_unobserved'] = (
                 run['publication_count'] != 0 or
                 snapshot.json(CONTROL + '/config.json')['schema_version'] < 7 or

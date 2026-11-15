@@ -164,7 +164,7 @@ def workspace_snapshot(store, task_id, run_id, state, run, *, include_signals=Tr
         paths.discard(path)
     if any(not runtime.allowed(task_id, run_id, p, run) for p in paths):
         raise TaskError("Work history or pending files cross the run's data/artifact boundary")
-    baseline = Snapshot(store, run['source_head'])
+    baseline = published_source(store, run)
     changes = {}
     for path in paths:
         if not include_signals and path.startswith(runtime.data_prefix(run, task_id) + 'signals/'):
@@ -184,6 +184,44 @@ def workspace_snapshot(store, task_id, run_id, state, run, *, include_signals=Tr
     ref = 'refs/task-runtime-snapshots/' + store.local.name + '/' + identity(task_id) + '/' + identity(run_id)
     git(store.repo, 'update-ref', ref, commit)
     return Snapshot(store, commit), set(changes)
+
+
+def published_source(store, run):
+    """Reconstruct a published baseline when its local commit is unavailable."""
+    kind = git(store.repo, 'cat-file', '--batch-check', input=run['source_head'] + '\n').split()
+    if len(kind) == 3 and kind[1] == 'commit':
+        return Snapshot(store, run['source_head'])
+    snapshot, path = runtime.run_metadata_snapshot(store.snapshot(), run['task_id'], run['run_id'], 'source.json')
+    saved = snapshot.json(path, {})
+    if (saved.get('schema_version') != 1 or any(saved.get(k) != run[k] for k in
+            ('task_id', 'run_id', 'generation', 'definition_commit', 'source_head')) or
+            not isinstance(saved.get('entries'), dict)):
+        raise TaskError('Published source baseline is unavailable; retain the checkpoint for reconciliation')
+    entries = saved['entries']
+    prefix = path.rsplit('/', 1)[0] + '/source/'
+    actual = {p[len(prefix):]: e for p, e in snapshot.entries.items() if p.startswith(prefix)}
+    expected = {p: tuple(e) for p, e in entries.items() if e is not None}
+    if (any(not runtime.allowed(run['task_id'], run['run_id'], p, run) for p in entries) or
+            any(len(e) != 3 or e[0] not in ('100644', '100755') or e[1] != 'blob' for e in expected.values()) or
+            actual != expected):
+        raise TaskError('Published source baseline differs from its manifest')
+    head = store.commit(run['definition_commit'], entries, 'Reconstruct published source ' + run['run_id'])
+    return Snapshot(store, head)
+
+
+def source_changes(store, snapshot, run, source):
+    """Retain raw submitted blobs in the same CAS as their accepted output."""
+    path = runtime.run_path(run['task_id'], run['run_id'], snapshot)
+    prefix = path + '/source/'
+    definition = Snapshot(store, run['definition_commit'])
+    entries = {p: source.entries.get(p) for p in run['artifact_manifest']
+               if source.entries.get(p) != definition.entries.get(p)}
+    changes = {p: None for p in snapshot.entries if p.startswith(prefix)}
+    changes.update({prefix + p: e for p, e in entries.items() if e is not None})
+    changes[path + '/source.json'] = encode(dict(schema_version=1,
+        **{k: run[k] for k in ('task_id', 'run_id', 'generation', 'definition_commit')},
+        source_head=source.commit, entries=entries))
+    return changes
 
 
 def file_fingerprint(path):
@@ -241,7 +279,7 @@ def verify_saved_workspace(store, run, work):
                  ('ls-files', '--others', '--exclude-standard', '-z'),
                  ('ls-files', '--others', '--ignored', '--exclude-standard', '-z')]:
         paths.update(runtime.names(work, *args))
-    source = Snapshot(store, run['source_head'])
+    source = published_source(store, run)
     for name in paths:
         if not runtime.allowed(run['task_id'], run['run_id'], name, run):
             raise TaskError('Workspace contains unpreserved files')

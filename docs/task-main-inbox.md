@@ -121,13 +121,20 @@ requires reconciliation. Newly changed files must stay within the admitted task'
 data/artifact boundary. Executor-owned directories are never automatically removed.
 Owned temporary worktrees are removed only after exact output and termination
 checks; unknown files or commits retain the workspace.
-Before collection, explicit worker commits are preserved remotely under
-`refs/tags/task-work-history/<task-id>/<run-id>`. These history tags are retained
-independently of disposable run refs and metadata. Reverting an earlier published
+Before collection, explicit worker commits are preserved locally under
+`refs/tags/task-work-history/<task-id>/<run-id>`. Histories that do not touch
+protected pre-existing files are also retained under that ref remotely; mixed
+histories stay local so unrelated work is never uploaded by cleanup. These tags
+are independent of disposable run refs and metadata. Reverting an earlier published
 file, or deleting a published new file, is captured by the next publish/finish.
 Discard finish can use the accepted authority tree from another clone without
 access to local publication snapshots. It leaves unpublished workspace files and
 deferred input results unadopted.
+Explicit remote work checkpoints can be restored after confirmed writer stop and
+operation settlement. Each publication keeps its submitted baseline blobs and
+manifest in the same authority CAS, allowing another clone to reconcile later
+checkpoint edits with accepted concurrent changes. This execution metadata is
+retired after completion; worker commit history is not merged into main.
 
 Use `run finish --input-results-file results.json` with an object mapping captured
 message IDs to verified result objects, e.g. `{"request-1":{"status":"succeeded"}}`.

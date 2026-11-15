@@ -186,7 +186,7 @@ def collect_local(store, run):
             elif (git(work, "status", "--porcelain", "--untracked-files=all") or
                     git(work, "ls-files", "--others", "--ignored", "--exclude-standard")):
                 raise TaskError("Workspace contains unpreserved files")
-            source = Snapshot(store, run["source_head"])
+            source = None if run.get('main_inbox_protocol') else Snapshot(store, run["source_head"])
             for path, entry in run["artifact_manifest"].items():
                 if not run.get('main_inbox_protocol') and source.entries.get(path) != (tuple(entry) if entry else None):
                     raise TaskError("Workspace does not match the accepted output")
@@ -218,6 +218,17 @@ def preserve_work_history(store, run):
     if not head or store.contains(run['definition_commit'], head):
         return
     ref = 'refs/tags/task-work-history/' + identity(run['task_id']) + '/' + identity(run['run_id'])
+    if git(store.repo, 'show-ref', '--verify', '--quiet', ref, predicate=True):
+        if git(store.repo, 'rev-parse', ref) != head:
+            raise TaskError('Local worker history ref changed; retain the workspace')
+    else:
+        git(store.repo, 'update-ref', ref, head, '0' * len(head))
+    state_path = runtime.local_state(store, run['task_id'], run['run_id'])
+    protected = json.loads(state_path.read_text()).get('preserved_files', {}) if state_path.exists() else {}
+    if protected and git(store.repo, 'log', '--format=', '--name-only', '--no-renames', '-m', '-z',
+                         run['definition_commit'] + '..' + head, '--',
+                         *(':(literal)' + p for p in protected)):
+        return  # Preserve mixed history locally without publishing protected work.
     actual = store.remote_tip(ref)
     if actual is None:
         store.push(ref, head, None)
@@ -304,7 +315,7 @@ def _retire_metadata(store, task_id, run_id, *, apply):
         owned = {'task_id': task_id, 'run_id': run_id}
         paths = []
         for path in snapshot.entries:
-            if path in (prefix + '/run.json', prefix + '/result.json', prefix + '/cleanup.json') or path.startswith(prefix + '/io/'):
+            if path in (prefix + '/run.json', prefix + '/result.json', prefix + '/cleanup.json', prefix + '/source.json') or path.startswith((prefix + '/io/', prefix + '/source/')):
                 paths.append(path)
             elif path.startswith(CONTROL + '/operations/') and path.endswith('.json'):
                 receipt = snapshot.json(path)

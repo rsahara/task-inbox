@@ -4,7 +4,7 @@ import sys
 from unittest.mock import patch
 
 from task_runtime_test import ROOT, RuntimeCase
-from task_runtime import lifecycle, main_io, maintenance, runtime, signals, task_io
+from task_runtime import interfaces, lifecycle, main_io, maintenance, runtime, signals, task_io
 from task_runtime.store import GitFailure, TaskError, encode, git
 
 
@@ -166,6 +166,94 @@ class MainInboxTest(RuntimeCase):
         self.assertTrue(git(self.b, 'cat-file', '-e', result['source_head'] + '^{commit}', predicate=True))
         self.assertEqual(runtime.publish(self.sa, 'remote-cancel', 'source', 'remote-discard',
                                         outcome='cancelled', discard_output=True)['source_head'], result['source_head'])
+
+    def test_restore_explicit_checkpoint_after_publish_keeps_raw_merge_baseline(self):
+        name = 'tasks/source/data/shared.txt'
+        self.sa.transact('seed-restore', dict(kind='fixture'), lambda s: ({name: b'a\nb\nc\nd\ne\n'}, {}))
+        work = self.run_source('restored', [])
+        run = runtime.check(self.sa, 'source', 'restored')
+        self.output(work, name, b'a\nb\nc\nd\nworker\n')
+        self.git(work, 'add', '.'); self.git(work, 'commit', '-m', 'Explicit output')
+        self.sa.transact('concurrent-restore', dict(kind='fixture'), lambda s: ({name: b'main\nb\nc\nd\ne\n'}, {}))
+        published = runtime.publish(self.sa, 'before-restore', 'source', 'restored')
+        self.output(work, name, b'a\nb\nlater\nd\nworker\n')
+        self.output(work, 'tasks/source/data/unpublished.txt', b'checkpoint only\n')
+        self.git(work, 'add', '.'); self.git(work, 'commit', '-m', 'Explicit later checkpoint')
+        self.git(work, 'push', 'origin', 'HEAD:' + run['work_ref'])
+        restored = self.base / 'restored-other-clone'
+        runtime.prepare(self.sb, 'source', 'restored', restored, restore=True, stopped=True, settled=True)
+        self.assertNotEqual(self.command('git', '-C', str(self.b), 'cat-file', '-e',
+                                         published['source_head'] + '^{commit}', ok=False).returncode, 0)
+        runtime.publish(self.sb, 'finish-restored', 'source', 'restored', outcome='succeeded')
+        self.assertEqual(self.sa.snapshot().read(name), b'main\nb\nlater\nd\nworker\n')
+        self.assertEqual(self.sa.snapshot().read('tasks/source/data/unpublished.txt'), b'checkpoint only\n')
+
+    def test_restore_accepts_a_boundary_checked_merge_checkpoint(self):
+        work = self.run_source('merge-restore', [])
+        run = runtime.check(self.sa, 'source', 'merge-restore')
+        base = self.git(work, 'rev-parse', 'HEAD')
+        other = self.git(work, 'commit-tree', base + '^{tree}', '-p', base, '-m', 'Other branch')
+        self.git(work, 'commit', '--allow-empty', '-m', 'Worker branch')
+        head = self.git(work, 'rev-parse', 'HEAD')
+        self.output(work, 'tasks/source/data/merge-only.txt')
+        self.git(work, 'add', '.')
+        merged = self.git(work, 'commit-tree', self.git(work, 'write-tree'), '-p', head, '-p', other, '-m', 'Merge')
+        self.git(work, 'reset', '--hard', merged)
+        runtime.publish(self.sa, 'save-merge-restore', 'source', 'merge-restore')
+        self.git(work, 'push', 'origin', 'HEAD:' + run['work_ref'])
+        runtime.prepare(self.sb, 'source', 'merge-restore', self.base / 'restored-merge',
+                        restore=True, stopped=True, settled=True)
+        runtime.publish(self.sb, 'finish-merge-restore', 'source', 'merge-restore', outcome='succeeded')
+        self.assertEqual(self.sa.snapshot().read('tasks/source/data/merge-only.txt'), b'output\n')
+
+    def test_restore_rejects_a_corrupted_published_source_baseline(self):
+        work = self.run_source('damaged-source', [])
+        run = runtime.check(self.sa, 'source', 'damaged-source')
+        name = 'tasks/source/data/output.txt'
+        self.output(work, name)
+        self.git(work, 'add', '.'); self.git(work, 'commit', '-m', 'Explicit checkpoint')
+        runtime.publish(self.sa, 'save-damaged', 'source', 'damaged-source')
+        self.git(work, 'push', 'origin', 'HEAD:' + run['work_ref'])
+        self.sa.transact('damage-source', dict(kind='fixture'), lambda s: ({
+            'tasks/source/runs/damaged-source/source/' + name: b'corrupted\n'}, {}))
+        with self.assertRaisesRegex(TaskError, 'source baseline differs'):
+            runtime.prepare(self.sb, 'source', 'damaged-source', self.base / 'damaged-restore',
+                            restore=True, stopped=True, settled=True)
+        self.assertEqual(runtime.check(self.sa, 'source', 'damaged-source')['status'], 'running')
+
+    def test_output_declarations_use_publishable_identity_bounds(self):
+        for invalid in ('data.a', 'a' * 97, 'data.*', 'a' * 97 + '*'):
+            contract = interface('*' not in invalid)
+            contract['signals']['writes'][0]['id'] = invalid
+            with self.subTest(identity=invalid), self.assertRaises(TaskError):
+                interfaces.validate(contract)
+        maximum = 'a' * 96
+        contract = interface(True)
+        contract['signals']['writes'][0]['id'] = maximum
+        runtime.edit_task(self.sa, 'max-output', 'source', 1, interface=contract)
+        self.run_source('max-output', [signal(maximum)])
+        self.finish('max-output')
+        self.assertIn(maximum, signals.catalog(self.sa.snapshot(), 'source'))
+
+    def test_history_with_preexisting_files_is_retained_locally_without_upload(self):
+        self.start('protected-history', task='source')
+        run = runtime.check(self.sa, 'source', 'protected-history')
+        work = self.base / 'protected-workspace'
+        self.git(self.a, 'worktree', 'add', '--detach', str(work), run['definition_commit'])
+        self.output(work, 'unrelated.txt', b'preserved synthetic note\n')
+        self.git(work, 'add', 'unrelated.txt')
+        runtime.prepare(self.sa, 'source', 'protected-history', work, mode='workspace')
+        self.output(work, 'tasks/source/data/output.txt')
+        self.git(work, 'add', 'tasks/source/data/output.txt')
+        self.git(work, 'commit', '-m', 'Explicit mixed checkpoint')
+        head = self.git(work, 'rev-parse', 'HEAD')
+        self.finish('protected-history')
+        ref = 'refs/tags/task-work-history/source/protected-history'
+        self.assertEqual(self.git(self.a, 'rev-parse', ref), head)
+        self.assertIsNone(self.sa.remote_tip(ref))
+        self.assertIsNone(self.sa.snapshot().read('unrelated.txt'))
+        self.assertEqual(self.sa.snapshot().read('tasks/source/data/output.txt'), b'output\n')
+        self.assertEqual((work / 'unrelated.txt').read_bytes(), b'preserved synthetic note\n')
 
     def test_finish_captures_restored_and_deleted_published_files(self):
         name = 'tasks/source/data/existing.txt'
