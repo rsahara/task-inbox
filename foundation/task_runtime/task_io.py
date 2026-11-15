@@ -71,17 +71,17 @@ class IOStore(Store):
 
     def run_view(self, authority, stream):
         """Project authority events together with the independent heartbeat."""
+        prefix = runtime.run_path(self.run['task_id'], self.run['run_id'], self.run) + '/io/'
+        records = {p[len(prefix):]: e for p, e in authority.entries.items() if p.startswith(prefix)}
+        if not records:
+            return stream
         snapshot = copy.copy(authority)
         snapshot.entries = dict(stream.entries)
-        prefix = runtime.run_path(self.run['task_id'], self.run['run_id'], self.run) + '/io/'
-        for path, entry in authority.entries.items():
-            if not path.startswith(prefix):
-                continue
-            name = path[len(prefix):]
+        for name, entry in records.items():
             if name in snapshot.entries and snapshot.entries[name] != entry:
                 raise TaskError('Authority and run stream I/O records conflict')
             snapshot.entries[name] = entry
-        if snapshot.entries and CONTROL + '/config.json' not in snapshot.entries:
+        if CONTROL + '/config.json' not in snapshot.entries:
             snapshot.entries[CONTROL + '/config.json'] = self.authority.blob(encode(self.manifest))
         return snapshot
 

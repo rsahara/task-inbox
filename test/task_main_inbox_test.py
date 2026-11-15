@@ -209,6 +209,7 @@ class MainInboxTest(RuntimeCase):
     def test_live_io_reader_combines_authority_events_and_isolated_heartbeat(self):
         self.run_source('live-events', [])
         run = runtime.check(self.sa, 'source', 'live-events')
+        self.assertIsNone(task_io.IOStore(self.sb, 'source', run).optional().commit)
         task_io.emit(self.sa, 'intent-live', 'source', 'live-events', 'intent', 'external-intent', {})
         view = task_io.IOStore(self.sb, 'source', run).optional()
         self.assertEqual(view.json('events/intent.json')['kind'], 'external-intent')
