@@ -99,7 +99,8 @@ state by a later sync; they are committed with their source run's finish.
 
 Version 2 notifications contain the fixed signal value, subscription identity,
 trigger and revision, plus the source run ID for `run`. Their IDs are deterministic.
-`read_notice` validates this evidence. Consumers may instead choose to coalesce
+`read_notice` validates the embedded value and returns its hash; it does not
+pair that frozen hash with a latest-main source file path. Consumers may instead choose to coalesce
 and inspect latest main state. Legacy task-level routes and hint notifications are
 retained on migration; they continue to converge to current state.
 

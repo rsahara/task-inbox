@@ -177,6 +177,7 @@ class MainInboxTest(RuntimeCase):
         first = next(m for m in task_io.pending(self.sb, 'observer')['messages'] if m['payload']['revision'] == 1)
         frozen = signals.read_notice(self.sb, first)['signal']
         self.assertEqual(frozen, signal())
+        self.assertNotIn('path', signals.read_notice(self.sb, first))
 
     def test_concurrent_main_change_uses_normal_content_merge_and_conflicts_retain_run(self):
         name = 'tasks/source/data/shared.txt'

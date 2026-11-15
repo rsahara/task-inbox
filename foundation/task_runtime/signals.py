@@ -306,8 +306,10 @@ def read_notice(store, message, *, snapshot=None):
                 or value.get('trigger') not in ('change', 'run')
                 or message.get('id') != notice_id(value)):
             raise TaskError('Invalid fixed signal notification')
-        return dict(value, commit=snapshot.commit, path=path(snapshot, signal['task_id']) + signal['id'] + '.json',
-                    sha256=digest(signal), type=signal['type'], status=signal['status'])
+        # The embedded value is the evidence. A latest-main source path could
+        # already contain a newer revision and must not be paired with this hash.
+        return dict(value, commit=snapshot.commit, sha256=digest(signal),
+                    type=signal['type'], status=signal['status'])
     if message.get('kind') != KIND or value.get('schema_version') != 1:
         raise TaskError('Invalid signal notification')
     task_id = identity(value.get('task_id'), 'source task ID')
