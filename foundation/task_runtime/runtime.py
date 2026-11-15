@@ -652,7 +652,7 @@ def _publish(store, operation_id, task_id, run_id, *, outcome=None, summary="", 
             else:
                 if not discard_output:
                     raise TaskError("Prepare or restore the run workspace before publishing or finishing")
-                if run["publication_count"]:
+                if run["publication_count"] and not authority_inbox:
                     store.fetch(run["work_ref"])
                 source, touched = Snapshot(store, run["source_head"]), set()
             preparation = {"request_hash": digest(request), "source_head": source.commit,

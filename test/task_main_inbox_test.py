@@ -105,6 +105,18 @@ class MainInboxTest(RuntimeCase):
         self.assertFalse(self.git(self.a, 'rev-list', '--merges', self.sa.fetch()))
         self.assertFalse(self.sa.remote_tip('refs/heads/task-runtime/source/one/work'))
 
+    def test_discard_after_publication_does_not_require_an_implicit_remote_checkpoint(self):
+        work = self.run_source('one', [])
+        self.output(work, 'tasks/source/data/accepted.txt')
+        runtime.publish(self.sa, 'publish', 'source', 'one')
+        self.output(work, 'tasks/source/data/unadopted.txt')
+        runtime.publish(self.sa, 'cancel', 'source', 'one', outcome='cancelled', discard_output=True)
+        snap = self.sa.snapshot()
+        self.assertEqual(runtime.load_run(snap, 'source', 'one')[2]['status'], 'cancelled')
+        self.assertIsNotNone(snap.read('tasks/source/data/accepted.txt'))
+        self.assertIsNone(snap.read('tasks/source/data/unadopted.txt'))
+        self.assertTrue((work / 'tasks/source/data/unadopted.txt').exists())
+
     def test_required_output_and_type_contract(self):
         runtime.edit_task(self.sa, 'required', 'source', 1, interface=interface(True))
         self.run_source('one', [])
