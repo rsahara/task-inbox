@@ -173,6 +173,24 @@ class MainInboxTest(RuntimeCase):
                          ['Explicit empty checkpoint', 'Explicit output history'])
         self.assertFalse(self.git(self.a, 'rev-list', '--merges', self.sa.fetch()))
 
+    def test_finish_captures_files_created_only_in_an_explicit_merge_commit(self):
+        work = self.run_source('merged', [])
+        base = self.git(work, 'rev-parse', 'HEAD')
+        other = self.git(work, 'commit-tree', base + '^{tree}', '-p', base, '-m', 'Other branch')
+        self.git(work, 'commit', '--allow-empty', '-m', 'Worker branch')
+        head = self.git(work, 'rev-parse', 'HEAD')
+        name = 'tasks/source/data/merge-only.txt'
+        self.output(work, name, b'merge output\n')
+        self.git(work, 'add', name)
+        tree = self.git(work, 'write-tree')
+        merged = self.git(work, 'commit-tree', tree, '-p', head, '-p', other, '-m', 'Merge resolution')
+        self.git(work, 'reset', '--hard', merged)
+        self.assertFalse(self.git(work, 'status', '--porcelain'))
+        self.finish('merged')
+        self.assertEqual(self.sa.snapshot().read(name), b'merge output\n')
+        self.assertFalse(work.exists())
+        self.assertEqual(self.sa.remote_tip('refs/tags/task-work-history/source/merged'), merged)
+
     def test_finish_manifest_includes_authority_events_with_and_without_heartbeat(self):
         for heartbeat in (False, True):
             rid = 'events-' + str(heartbeat).lower()

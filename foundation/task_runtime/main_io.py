@@ -153,7 +153,7 @@ def workspace_snapshot(store, task_id, run_id, state, run, *, include_signals=Tr
     paths = set(run.get('artifact_manifest', {}))
     for commit in git(work, 'rev-list', run['definition_commit'] + '..HEAD').splitlines():
         paths.update(runtime.names(work, 'diff-tree', '--no-commit-id', '--name-only',
-                                   '--no-renames', '-r', '-z', commit))
+                                   '--no-renames', '-m', '-r', '-z', commit))
     for args in [('diff', '--name-only', '--no-renames', '-z'),
                  ('diff', '--cached', '--name-only', '--no-renames', '-z'),
                  ('ls-files', '--others', '--exclude-standard', '-z')]:
