@@ -223,12 +223,15 @@ def run_process(args, *, cwd=None, input=None, timeout):
 
 
 def git(repo, *args, input=None, strip=True, binary=False, predicate=False):
+    setting = "TASKS_GIT_TIMEOUT_SECONDS"
+    if args[:2] == ("worktree", "add") and "TASKS_GIT_WORKTREE_ADD_TIMEOUT_SECONDS" in os.environ:
+        setting = "TASKS_GIT_WORKTREE_ADD_TIMEOUT_SECONDS"
     try:
-        seconds = float(os.environ.get("TASKS_GIT_TIMEOUT_SECONDS", "60"))
+        seconds = float(os.environ.get(setting, "60"))
     except (TypeError, ValueError):
-        raise ValueError("TASKS_GIT_TIMEOUT_SECONDS must be finite and positive") from None
+        raise ValueError(f"{setting} must be finite and positive") from None
     if not math.isfinite(seconds) or seconds <= 0:
-        raise ValueError("TASKS_GIT_TIMEOUT_SECONDS must be finite and positive")
+        raise ValueError(f"{setting} must be finite and positive")
     operation = next((arg for arg in args if arg in OPERATIONS), 'other')
     event = next(EVENTS)
     data = input.encode() if isinstance(input, str) else input

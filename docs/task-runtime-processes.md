@@ -4,6 +4,11 @@
 groups on cancellation, and reports structured diagnostics without raw remote
 output or credentials. It is part of the distributable package.
 
+`TASKS_GIT_TIMEOUT_SECONDS` bounds each Git command and defaults to 60 seconds.
+On hosts where materializing the working tree takes longer, set
+`TASKS_GIT_WORKTREE_ADD_TIMEOUT_SECONDS` to override that deadline for
+`git worktree add`. Both settings take a finite positive number of seconds.
+
 Each Git command uses `maintenance.autoDetach=false` and `gc.autoDetach=false`.
 Automatic maintenance stays enabled but remains a child of the owned Git command,
 within the same timeout. Repository/global configuration is not changed.
