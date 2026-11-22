@@ -223,12 +223,12 @@ def inbox_messages(snapshot, prefix_path):
 def pending(store, task_id, *, authority=None):
     from . import main_io, signals
     authority = authority or store.snapshot()
-    runtime.load_task(authority, task_id)
     if main_io.enabled(authority):
         snapshot, ref = authority, store.ref
         prefix_path = main_io.inbox(authority, task_id)
         cutoffs = signals.pending_cutoffs(authority, task_id)
     else:
+        runtime.load_task(authority, task_id)
         stream = IOStore(store, task_id)
         snapshot, ref = stream.optional(), stream.ref
         prefix_path, cutoffs = 'messages/', {}

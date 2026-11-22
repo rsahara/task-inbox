@@ -85,6 +85,9 @@ class MainInboxTest(RuntimeCase):
         self.assertEqual(same['pending'], 'latest')
         self.assertEqual(revisions(), [('data-a', 2), ('data-b', 1)])
         self.assertEqual(revisions('observer'), [('data-a', 1), ('data-a', 2)])
+        with patch.object(signals, 'catalog', wraps=signals.catalog) as catalog:
+            self.assertEqual(signals.sync(self.sb, task_id='source')['delivered'], 0)
+            self.assertEqual(catalog.call_count, 1)
         status = task_io.status(self.sb, 'viewer', old)
         self.assertEqual(status['status'], 'superseded')
         self.assertIsNone(status['receipt'])

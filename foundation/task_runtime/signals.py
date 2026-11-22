@@ -184,7 +184,7 @@ def subscribe(store, operation_id, task_id, consumer, *, signal_id=None, on='cha
                     route['pending'] = 'latest'
                 else:
                     # Freeze the cutoff when returning to all, so retired revisions stay retired.
-                    route['superseded_before'] = delivered_revision(snapshot, route)
+                    route['superseded_before'] = _delivered_revision(snapshot, route)
                     route.pop('pending')
                 return {SUBSCRIPTIONS: encode(config)}, route
         config['subscriptions'].append(item)
@@ -350,7 +350,7 @@ def notice_id(payload):
     return 'signal-' + digest(key)[:64]
 
 
-def route_revision(route, message):
+def _route_revision(route, message):
     payload = message['payload']
     if (message['kind'] == KIND and payload.get('schema_version') == 2
             and payload.get('subscription_id') == route['id'] and payload.get('trigger') == 'change'
@@ -360,7 +360,7 @@ def route_revision(route, message):
     return 0
 
 
-def notice(route, value, run=None):
+def _notice(route, value, run=None):
     owner, sid, rev = route['task_id'], value['id'], value['revision']
     if 'id' in route:
         trigger = route.get('on', 'change')
@@ -374,7 +374,7 @@ def notice(route, value, run=None):
     return dict(schema_version=1, id=mid, kind=KIND, payload=payload)
 
 
-def delivered_revision(snapshot, route):
+def _delivered_revision(snapshot, route):
     """The immutable notice is the delivery watermark, even after acceptance."""
     from . import main_io, task_io
     record = catalog(snapshot, route['task_id']).get(route['signal_id'])
@@ -382,11 +382,11 @@ def delivered_revision(snapshot, route):
         return 0
     current = record['value']
     prefix = main_io.inbox(snapshot, route['consumer'])
-    expected = notice(route, current)
+    expected = _notice(route, current)
     if snapshot.json(prefix + expected['id'] + '.json') == expected:
         return current['revision']
     # A newly installed route or an unsynchronized snapshot can lag the source.
-    revisions = (route_revision(route, m) for m in task_io.inbox_messages(snapshot, prefix))
+    revisions = (_route_revision(route, m) for m in task_io.inbox_messages(snapshot, prefix))
     return max((rev for rev in revisions if rev < current['revision']), default=0)
 
 
@@ -394,7 +394,7 @@ def pending_cutoffs(snapshot, consumer):
     cutoffs = {}
     for route in snapshot.json(SUBSCRIPTIONS, {}).get('subscriptions', []):
         if route['consumer'] == consumer:
-            cutoff = (delivered_revision(snapshot, route) if route.get('pending') == 'latest'
+            cutoff = (_delivered_revision(snapshot, route) if route.get('pending') == 'latest'
                       else route.get('superseded_before', 0))
             if cutoff:
                 cutoffs[route['id']] = (route, cutoff)
@@ -405,7 +405,7 @@ def is_superseded(message, cutoffs):
     sid = message['payload'].get('subscription_id')
     if isinstance(sid, str) and sid in cutoffs:
         route, cutoff = cutoffs[sid]
-        return 0 < route_revision(route, message) < cutoff
+        return 0 < _route_revision(route, message) < cutoff
     return False
 
 
@@ -414,6 +414,7 @@ def delivery_changes(snapshot, *, task_id=None, participant=None, run=None, conf
     from . import main_io
     config = snapshot.json(SUBSCRIPTIONS, {'subscriptions': []})
     changes, count = {}, 0
+    catalogs = {}
     for route in config['subscriptions']:
         owner, consumer = route['task_id'], route['consumer']
         if task_id is not None and task_id != owner:
@@ -423,7 +424,9 @@ def delivery_changes(snapshot, *, task_id=None, participant=None, run=None, conf
         trigger = route.get('on', 'change')
         if trigger == 'run' and run is None:
             continue  # Run events are never inferred from the latest state.
-        for record in catalog(snapshot, owner).values():
+        if owner not in catalogs:
+            catalogs[owner] = catalog(snapshot, owner)
+        for record in catalogs[owner].values():
             value = record['value']
             if route.get('signal_id') is not None and route['signal_id'] != value['id']:
                 continue
@@ -431,7 +434,7 @@ def delivery_changes(snapshot, *, task_id=None, participant=None, run=None, conf
                 continue
             if trigger == 'change' and value['revision'] <= route.get('after_revision', 0):
                 continue
-            message = notice(route, value, run)
+            message = _notice(route, value, run)
             added = main_io.append(snapshot, consumer, message, changes)
             changes.update(added); count += bool(added)
     return changes, count
