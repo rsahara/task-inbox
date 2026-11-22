@@ -92,6 +92,26 @@ task-inbox --operation-id subscribe-b signal subscribe --task task-a \
   this output, even if its revision is unchanged. Only `initial=next` is allowed.
   A run that did not confirm this optional output creates no notification.
 
+For an exact `change` subscription, `--pending latest` keeps only the highest
+delivered revision eligible for a new run. The default for a new subscription
+is `all`. For example:
+
+```sh
+task-inbox --operation-id latest-a signal subscribe --task task-a \
+  --signal-id data-a --consumer task-b --on change --initial next --pending latest
+```
+
+Use a fresh operation ID to change the policy. The subscription ID and initial
+revision baseline stay stable. Omitting the option on an existing route preserves
+its policy. The same setting in a subscription spec is `"pending": "latest"`.
+Deploy runtime 2.15 or later to every reader before enabling the policy. Existing
+waiting notifications participate immediately. The immutable messages in each
+authority snapshot record the latest delivered revision, including after its
+receipt arrives. `io status` reports a replaced input as `superseded` with a
+null receipt until an already-admitted run supplies its own captured result.
+A later delivery stays pending when that run finishes. Switching back through
+`signal subscribe --pending all` preserves the superseded cutoff for old inputs.
+
 Both conditions publish on successful finish. Intermediate `run publish`, failure
 and cancellation publish no signals or notifications. Business files can still be
 explicitly published during a run. Run events cannot be reconstructed from latest

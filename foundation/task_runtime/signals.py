@@ -137,11 +137,15 @@ def _put(store, task_id, run_id, value):
     return {'path': relative, 'publication': 'pending'}
 
 
-def subscription(snapshot, task_id, consumer, *, signal_id=None, on='change', initial='next'):
+def subscription(snapshot, task_id, consumer, *, signal_id=None, on='change', initial='next', pending=None):
     require_enabled(snapshot)
     runtime.load_task(snapshot, task_id); runtime.load_task(snapshot, consumer)
     if task_id == consumer:
         raise TaskError('A task cannot subscribe to its own signals')
+    if pending not in (None, 'all', 'latest'):
+        raise TaskError('Unknown pending policy')
+    if pending == 'latest' and (not signal_id or on != 'change'):
+        raise TaskError('Latest pending requires a signal-level change subscription')
     item = dict(task_id=task_id, consumer=consumer)
     if signal_id is None:
         if on != 'change' or initial != 'next':
@@ -161,25 +165,35 @@ def subscription(snapshot, task_id, consumer, *, signal_id=None, on='change', in
         raise TaskError('Subscribe to an exact declared output ID')
     item.update(signal_id=signal_id, on=on, initial=initial)
     item['id'] = 'subscription-' + digest(item)[:40]
+    if pending == 'latest':
+        item['pending'] = pending
     current = catalog(snapshot, task_id).get(signal_id)
     item['after_revision'] = current['value']['revision'] if current and initial == 'next' else 0
     return item
 
 
-def subscribe(store, operation_id, task_id, consumer, *, signal_id=None, on='change', initial='next'):
+def subscribe(store, operation_id, task_id, consumer, *, signal_id=None, on='change', initial='next', pending=None):
     def apply(snapshot):
-        item = subscription(snapshot, task_id, consumer, signal_id=signal_id, on=on, initial=initial)
-        config = snapshot.json(SUBSCRIPTIONS, {'schema_version':1, 'subscriptions':[]})
-        existing = next((s for s in config['subscriptions'] if s.get('id') == item.get('id')), None) if 'id' in item else None
-        if existing is not None:
-            return {}, existing
-        if item not in config['subscriptions']:
-            config = copy.deepcopy(config)
-            config['subscriptions'].append(item)
+        item = subscription(snapshot, task_id, consumer, signal_id=signal_id, on=on, initial=initial, pending=pending)
+        config = snapshot.json(SUBSCRIPTIONS, {'schema_version': 1, 'subscriptions': []})
+        for route in config['subscriptions']:
+            if route == item or ('id' in item and route.get('id') == item['id']):
+                if pending is None or route.get('pending', 'all') == pending:
+                    return {}, route
+                if pending == 'latest':
+                    route['pending'] = 'latest'
+                else:
+                    # Freeze the cutoff when returning to all, so retired revisions stay retired.
+                    route['superseded_before'] = delivered_revision(snapshot, route)
+                    route.pop('pending')
+                return {SUBSCRIPTIONS: encode(config)}, route
+        config['subscriptions'].append(item)
         return {SUBSCRIPTIONS: encode(config)}, item
     request = dict(kind='signal-subscribe', task_id=task_id, consumer=consumer)
     if signal_id is not None:
         request.update(signal_id=signal_id, on=on, initial=initial)
+    if pending is not None:
+        request['pending'] = pending
     return store.transact(operation_id, request, apply)
 
 
@@ -336,6 +350,65 @@ def notice_id(payload):
     return 'signal-' + digest(key)[:64]
 
 
+def route_revision(route, message):
+    payload = message['payload']
+    if (message['kind'] == KIND and payload.get('schema_version') == 2
+            and payload.get('subscription_id') == route['id'] and payload.get('trigger') == 'change'
+            and payload.get('task_id') == route['task_id'] and payload.get('signal_id') == route['signal_id']
+            and type(payload.get('revision')) is int and message['id'] == notice_id(payload)):
+        return payload['revision']
+    return 0
+
+
+def notice(route, value, run=None):
+    owner, sid, rev = route['task_id'], value['id'], value['revision']
+    if 'id' in route:
+        trigger = route.get('on', 'change')
+        payload = dict(schema_version=2, task_id=owner, signal_id=sid, revision=rev,
+                       subscription_id=route['id'], trigger=trigger, signal=value,
+                       run_id=run['run_id'] if trigger == 'run' else None)
+        mid = notice_id(payload)
+    else:
+        payload = dict(schema_version=1, task_id=owner, signal_id=sid, revision=rev)
+        mid = message_id(owner, sid, rev)
+    return dict(schema_version=1, id=mid, kind=KIND, payload=payload)
+
+
+def delivered_revision(snapshot, route):
+    """The immutable notice is the delivery watermark, even after acceptance."""
+    from . import main_io, task_io
+    record = catalog(snapshot, route['task_id']).get(route['signal_id'])
+    if not record:
+        return 0
+    current = record['value']
+    prefix = main_io.inbox(snapshot, route['consumer'])
+    expected = notice(route, current)
+    if snapshot.json(prefix + expected['id'] + '.json') == expected:
+        return current['revision']
+    # A newly installed route or an unsynchronized snapshot can lag the source.
+    revisions = (route_revision(route, m) for m in task_io.inbox_messages(snapshot, prefix))
+    return max((rev for rev in revisions if rev < current['revision']), default=0)
+
+
+def pending_cutoffs(snapshot, consumer):
+    cutoffs = {}
+    for route in snapshot.json(SUBSCRIPTIONS, {}).get('subscriptions', []):
+        if route['consumer'] == consumer:
+            cutoff = (delivered_revision(snapshot, route) if route.get('pending') == 'latest'
+                      else route.get('superseded_before', 0))
+            if cutoff:
+                cutoffs[route['id']] = (route, cutoff)
+    return cutoffs
+
+
+def is_superseded(message, cutoffs):
+    sid = message['payload'].get('subscription_id')
+    if isinstance(sid, str) and sid in cutoffs:
+        route, cutoff = cutoffs[sid]
+        return 0 < route_revision(route, message) < cutoff
+    return False
+
+
 def delivery_changes(snapshot, *, task_id=None, participant=None, run=None, confirmed=()):
     """Append all selected inbox messages inside the producer's main transaction."""
     from . import main_io
@@ -358,18 +431,7 @@ def delivery_changes(snapshot, *, task_id=None, participant=None, run=None, conf
                 continue
             if trigger == 'change' and value['revision'] <= route.get('after_revision', 0):
                 continue
-            if 'id' in route:
-                payload = dict(schema_version=2, task_id=owner, signal_id=value['id'],
-                    revision=value['revision'], subscription_id=route['id'], trigger=trigger,
-                    run_id=run['run_id'] if run else None, signal=value)
-                # change identity/content must not depend on which run synchronized it.
-                if trigger == 'change':
-                    payload['run_id'] = None
-                mid = notice_id(payload)
-            else:
-                payload = dict(schema_version=1, task_id=owner, signal_id=value['id'], revision=value['revision'])
-                mid = message_id(owner, value['id'], value['revision'])
-            message = dict(schema_version=1, id=mid, kind=KIND, payload=payload)
+            message = notice(route, value, run)
             added = main_io.append(snapshot, consumer, message, changes)
             changes.update(added); count += bool(added)
     return changes, count

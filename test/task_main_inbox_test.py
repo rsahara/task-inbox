@@ -64,6 +64,75 @@ class MainInboxTest(RuntimeCase):
         from task_runtime.store import Snapshot
         self.assertEqual(runtime.load_run(Snapshot(self.sa, commit), 'source', 'three')[2]['status'], 'succeeded')
 
+    def test_latest_pending_changes_apply_to_existing_and_captured_notices(self):
+        def revisions(task='viewer'):
+            return sorted((m['payload']['signal_id'], m['payload']['revision'])
+                          for m in task_io.pending(self.sb, task)['messages'])
+
+        route = signals.subscribe(self.sa, 'sub-a', 'source', 'viewer', signal_id='data-a')
+        signals.subscribe(self.sa, 'sub-b', 'source', 'viewer', signal_id='data-b')
+        signals.subscribe(self.sa, 'sub-observer', 'source', 'observer', signal_id='data-a')
+        self.run_source('one', [signal(), signal('data-b')])
+        self.finish('one')
+        self.run_source('two', [signal(value=2)])
+        self.finish('two')
+        old = next(m['id'] for m in task_io.pending(self.sb, 'viewer')['messages']
+                   if m['payload']['signal_id'] == 'data-a' and m['payload']['revision'] == 1)
+        latest = signals.subscribe(self.sa, 'enable-latest', 'source', 'viewer', signal_id='data-a', pending='latest')
+        self.assertEqual(latest['id'], route['id'])
+        self.assertEqual(latest['after_revision'], route['after_revision'])
+        same = signals.subscribe(self.sa, 'resub', 'source', 'viewer', signal_id='data-a')
+        self.assertEqual(same['pending'], 'latest')
+        self.assertEqual(revisions(), [('data-a', 2), ('data-b', 1)])
+        self.assertEqual(revisions('observer'), [('data-a', 1), ('data-a', 2)])
+        status = task_io.status(self.sb, 'viewer', old)
+        self.assertEqual(status['status'], 'superseded')
+        self.assertIsNone(status['receipt'])
+
+        self.start('consume', task='viewer')
+        self.prepare('consume', task='viewer')
+        captured = {m['id']: {'status': 'succeeded'} for m in task_io.pending(self.sb, 'viewer')['messages']}
+        main_io.stage_results(self.sa, 'viewer', 'consume', captured)
+        self.run_source('three', [signal(value=3)])
+        self.finish('three')
+        runtime.publish(self.sa, 'finish-consume', 'viewer', 'consume', outcome='succeeded')
+        self.assertEqual(revisions(), [('data-a', 3)])
+        for mid in captured:
+            self.assertEqual(task_io.status(self.sb, 'viewer', mid)['status'], 'succeeded')
+        self.start('consume-latest', task='viewer')
+        self.prepare('consume-latest', task='viewer')
+        message = task_io.pending(self.sb, 'viewer')['messages'][0]
+        runtime.publish(self.sa, 'finish-latest', 'viewer', 'consume-latest', outcome='succeeded',
+                        input_results={message['id']: {'status': 'succeeded'}})
+        self.assertEqual(signals.sync(self.sa)['delivered'], 0)
+        self.assertEqual(revisions(), [])
+        signals.subscribe(self.sa, 'use-all', 'source', 'viewer', signal_id='data-a', pending='all')
+        self.assertEqual(revisions(), [])
+        self.assertEqual(task_io.status(self.sb, 'viewer', old)['status'], 'superseded')
+
+    def test_latest_uses_delivered_not_published_revision_before_sync(self):
+        from task_runtime import cli
+        args = cli.parser().parse_args(['signal', 'subscribe', '--task', 'source', '--consumer', 'viewer',
+                                        '--signal-id', 'data-a', '--pending', 'latest'])
+        self.assertEqual(args.pending, 'latest')
+        signals.subscribe(self.sa, 'latest', 'source', 'viewer', signal_id='data-a', pending=args.pending)
+        for rev in (1, 2):
+            self.run_source('r' + str(rev), [signal(value=rev)])
+            self.finish('r' + str(rev))
+        # Simulate a retained source revision still awaiting sync.
+        path = signals.catalog(self.sa.snapshot(), 'source')['data-a']['path']
+        self.sa.transact('advance', {'kind': 'fixture'}, lambda snapshot:
+                         ({path: encode(dict(signal(value=3), revision=3))}, {}))
+        self.assertEqual([m['payload']['revision'] for m in task_io.pending(self.sb, 'viewer')['messages']], [2])
+        self.assertEqual(signals.sync(self.sa)['delivered'], 1)
+        self.assertEqual([m['payload']['revision'] for m in task_io.pending(self.sb, 'viewer')['messages']], [3])
+        self.assertEqual(signals.sync(self.sa)['delivered'], 0)
+
+    def test_latest_requires_exact_change_subscription(self):
+        for options in ({}, {'signal_id': 'data-a', 'on': 'run'}):
+            with self.assertRaisesRegex(TaskError, 'signal-level change'):
+                signals.subscribe(self.sa, 'invalid', 'source', 'viewer', pending='latest', **options)
+
     def test_input_result_output_and_notification_commit_or_none(self):
         signals.subscribe(self.sa, 'sub', 'source', 'viewer', signal_id='data-a')
         task_io.send(self.sa, 'request', 'source', 'input', 'work', {})

@@ -45,6 +45,7 @@ def parser():
             item.add_argument('--signal-id')
             item.add_argument('--on', choices=('change', 'run'), default='change')
             item.add_argument('--initial', choices=('next', 'current'), default='next')
+            item.add_argument('--pending', choices=('all', 'latest'), help='Waiting revision policy for this subscription')
         if name == 'list':
             item.add_argument('--include-ended', action='store_true')
     io = commands.add_parser('io').add_subparsers(dest='action', required=True)
@@ -187,7 +188,7 @@ def dispatch(args):
             return signals.put(store, args.task, args.run_id, json.loads(Path(args.file).read_text()))
         if args.action == 'sync':
             return signals.sync(store, task_id=args.task)
-        return signals.subscribe(store, operation, args.task, args.consumer, signal_id=args.signal_id, on=args.on, initial=args.initial)
+        return signals.subscribe(store, operation, args.task, args.consumer, signal_id=args.signal_id, on=args.on, initial=args.initial, pending=args.pending)
     if args.command == 'io':
         if args.action == 'migrate':
             from . import main_io
