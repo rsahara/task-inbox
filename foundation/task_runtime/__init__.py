@@ -1,3 +1,3 @@
 """Portable Git task coordination. No account, service, or task-number defaults."""
 
-VERSION = "2.14.0"
+VERSION = "2.15.0"

@@ -190,10 +190,10 @@ def send(store, operation_id, task_id, message_id, kind, payload):
                 message_sha256=digest(message), accepted=True, delivery_status='pending')
 
 
-def message(store, task_id, message_id):
+def message(store, task_id, message_id, *, authority=None):
     identity(message_id, 'message ID')
     from . import main_io
-    authority = store.snapshot()
+    authority = authority or store.snapshot()
     if main_io.enabled(authority):
         value = authority.json(main_io.inbox(authority, task_id) + identity(message_id) + '.json')
         if value is None:
@@ -211,32 +211,31 @@ def receipt_path(task_id, message_id, snapshot=None):
     return runtime.root(task_id, snapshot) + '/io/receipts/' + identity(message_id) + '.json'
 
 
-def pending(store, task_id, *, authority=None):
-    authority = authority or store.snapshot()
-    runtime.load_task(authority, task_id)
-    from . import main_io
-    if main_io.enabled(authority):
-        prefix_path = main_io.inbox(authority, task_id)
-        rows = []
-        for path in sorted(authority.entries):
-            if path.startswith(prefix_path) and path.endswith('.json'):
-                value = authority.json(path)
-                if path != prefix_path + identity(value.get('id')) + '.json':
-                    raise TaskError('Malformed task I/O message path')
-                if not authority.json(receipt_path(task_id, value['id'], authority)):
-                    rows.append(value)
-        return dict(task_id=task_id, ref=store.ref, commit=authority.commit, messages=rows)
-    stream = IOStore(store, task_id)
-    snapshot = stream.optional()
-    rows = []
+def inbox_messages(snapshot, prefix_path):
     for path in sorted(snapshot.entries):
-        if path.startswith('messages/') and path.endswith('.json'):
+        if path.startswith(prefix_path) and path.endswith('.json'):
             value = snapshot.json(path)
-            if path != 'messages/' + identity(value['id']) + '.json':
+            if path != prefix_path + identity(value.get('id'), 'message ID') + '.json':
                 raise TaskError('Malformed task I/O message path')
-            if not authority.json(receipt_path(task_id, value['id'], authority)):
-                rows.append(value)
-    return dict(task_id=task_id, ref=stream.ref, commit=snapshot.commit, messages=rows)
+            yield value
+
+
+def pending(store, task_id, *, authority=None):
+    from . import main_io, signals
+    authority = authority or store.snapshot()
+    if main_io.enabled(authority):
+        snapshot, ref = authority, store.ref
+        prefix_path = main_io.inbox(authority, task_id)
+        cutoffs = signals.pending_cutoffs(authority, task_id)
+    else:
+        runtime.load_task(authority, task_id)
+        stream = IOStore(store, task_id)
+        snapshot, ref = stream.optional(), stream.ref
+        prefix_path, cutoffs = 'messages/', {}
+    receipts = runtime.root(task_id, authority) + '/io/receipts/'
+    rows = [m for m in inbox_messages(snapshot, prefix_path)
+            if not authority.json(receipts + m['id'] + '.json') and not signals.is_superseded(m, cutoffs)]
+    return dict(task_id=task_id, ref=ref, commit=snapshot.commit, messages=rows)
 
 
 def _result(store, operation_id, task_id, run_id, message_id, value):
@@ -378,12 +377,17 @@ def _complete(store, operation_id, task_id, run_id, message_id, value):
 
 
 def status(store, task_id, message_id):
-    original, source = message(store, task_id, message_id)
     snapshot = store.snapshot()
+    original, source = message(store, task_id, message_id, authority=snapshot)
     receipt = snapshot.json(receipt_path(task_id, message_id, snapshot))
     if receipt and receipt['message_sha256'] != source['message_sha256']:
         raise TaskError('Accepted result does not match the current message')
-    return dict(message=original, receipt=receipt, status=receipt['result']['status'] if receipt else 'pending')
+    state = receipt['result']['status'] if receipt else 'pending'
+    if not receipt:
+        from . import signals
+        if signals.is_superseded(original, signals.pending_cutoffs(snapshot, task_id)):
+            state = 'superseded'
+    return dict(message=original, receipt=receipt, status=state)
 
 
 def heartbeat(store, run, progress, operation_id):
