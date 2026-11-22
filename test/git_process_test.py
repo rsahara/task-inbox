@@ -2,6 +2,7 @@
 import json
 import os
 from pathlib import Path
+import runpy
 import signal
 import subprocess
 import sys
@@ -40,6 +41,25 @@ class GitProcessTest(unittest.TestCase):
         path = self.bin / 'git'
         path.write_text('#!' + sys.executable + '\n' + body)
         path.chmod(0o755)
+
+    def test_worktree_add_timeout_override(self):
+        git = runpy.run_path(str(SCRIPT))['git']
+        result = subprocess.CompletedProcess([], 0, b'', b'')
+        setting = 'TASKS_GIT_WORKTREE_ADD_TIMEOUT_SECONDS'
+        with patch.dict(os.environ, {'TASKS_GIT_TIMEOUT_SECONDS': '2'}, clear=True), \
+                patch.dict(git.__globals__, run_process=Mock(return_value=result)):
+            process = git.__globals__['run_process']
+            git(self.root, 'worktree', 'add', 'workspace', 'branch')
+            self.assertEqual(process.call_args.kwargs['timeout'], 2)
+            os.environ[setting] = '37'
+            for args, expected in [(('worktree', 'add', 'workspace', 'branch'), 37),
+                                   (('worktree', 'remove', 'workspace'), 2), (('fetch', 'origin'), 2)]:
+                git(self.root, *args)
+                self.assertEqual(process.call_args.kwargs['timeout'], expected)
+            for invalid in ('0', 'inf', 'invalid'):
+                os.environ[setting] = invalid
+                with self.assertRaisesRegex(ValueError, setting):
+                    git(self.root, 'worktree', 'add', 'workspace', 'branch')
 
     def detached_defaults(self):
         # Preserve all inherited Git config/credential selectors while making
