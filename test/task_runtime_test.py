@@ -415,6 +415,23 @@ class TaskRuntimeTest(RuntimeCase):
         self.assertEqual(calls[:2], [self.sa.ref, self.sa.ref])
         self.assertEqual((result["sequence"], result["operation_id"]), (1, "original-beat"))
 
+    def test_heartbeat_recovers_from_failed_stream_ref_lookup(self):
+        from task_runtime.transport import DirectGit
+        self.add()
+        run = self.start()
+        read = DirectGit.read_ref
+        attempts = []
+        def transient(transport, ref):
+            if ref == run["io_ref"]:
+                attempts.append(ref)
+                if len(attempts) == 1:
+                    raise GitFailure("lookup failed", dict(operation="ls-remote", category="unknown", definite_rejection=False))
+            return read(transport, ref)
+        with patch.object(DirectGit, "read_ref", new=transient):
+            result = runtime.heartbeat(self.sa, "t", "r", operation_id="one-beat")
+        self.assertGreaterEqual(len(attempts), 2)
+        self.assertEqual((result["sequence"], result["operation_id"]), (1, "one-beat"))
+
     def test_heartbeat_bounds_fetch_retry_and_preserves_permanent_errors(self):
         for category, attempts in [("timeout", 2), ("authentication", 1), ("policy_denied", 1)]:
             with self.subTest(category=category):
