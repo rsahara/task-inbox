@@ -312,7 +312,7 @@ class Store:
             return self.transport.push(ref, candidate, expected, guard=guard)
         return self.transport.push(ref, candidate, expected)
 
-    def transact(self, operation_id, request, apply, *, initialize=False, attempt_ref=None):
+    def transact(self, operation_id, request, apply, *, initialize=False, attempt_ref=None, retry_unconfirmed=False):
         from . import leases
         from .transport import TransportError
         identity(operation_id, "operation ID")
@@ -438,6 +438,12 @@ class Store:
                     if (attempt_ref and remote.commit != tip and self.contains(remote.commit, tip) and
                             not self.contains(remote.commit, candidate)):
                         raise SupersededRenewal("Frozen renewal was superseded; check ownership before using a new operation ID") from None
+                    if (retry_unconfirmed and not guard and not attempt_ref and not found and attempt < 7
+                            and tip and self.contains(remote.commit, tip)
+                            and not self.contains(remote.commit, candidate)):
+                        # Re-enter receipt lookup with the original journal and conditional push.
+                        time.sleep(min(0.02 * (attempt + 1), 0.15))
+                        continue
                     raise TaskError("Push outcome is unknown; retry operation " + operation_id) from None
                 confirmed = Snapshot(self, self.fetch())
                 found = confirmed.metadata(receipt_path)
