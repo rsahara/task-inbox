@@ -164,7 +164,7 @@ class MainInboxTest(RuntimeCase):
         self.assertFalse(task_io.pending(self.sb, 'source')['messages'])
         self.assertEqual(self.finish('one')['status'], 'succeeded')
 
-    def test_common_supervisor_allows_verified_finish_and_rejects_an_unknown_relaunch(self):
+    def test_common_supervisor_allows_verified_finish_and_rejects_changed_command_before_spawn(self):
         definition = runtime.load_task(self.sa.snapshot(), 'source')[0]
         definition['execution']['heartbeat_seconds'] = 1
         self.sa.transact('fast-heartbeat', dict(kind='fixture'),
@@ -184,7 +184,7 @@ class MainInboxTest(RuntimeCase):
         with patch.object(runtime, 'heartbeat', side_effect=TaskError('ownership lost')):
             with self.assertRaisesRegex(TaskError, 'ownership lost'):
                 lifecycle.execute(self.sa, 'source', 'two', [sys.executable, '-c', 'raise AssertionError("launched")'], worker_finish=True)
-        with self.assertRaisesRegex(TaskError, 'already launched'):
+        with self.assertRaisesRegex(TaskError, 'same run and command'):
             lifecycle.execute(self.sa, 'source', 'two', [sys.executable, '-c', 'raise AssertionError("relaunched")'], worker_finish=True)
 
     def test_heartbeat_and_finish_do_not_commit_worker_files_or_merge_history(self):

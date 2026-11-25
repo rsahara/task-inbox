@@ -180,6 +180,36 @@ class TimeoutTests(shared.LeaseCase):
         self.assertTrue(changed)
         self.assertEqual(runtime.check(self.c.sa, "t", "r")["lease"]["expires_ms"], 1400000)
 
+    def test_starting_heartbeat_recovers_from_superseded_then_unknown_renewal(self):
+        self.enable(); self.c.start(); self.c.prepare()
+        command = [sys.executable, "-c", "print('started')"]
+        heartbeat, push = runtime.heartbeat, self.c.sa.push
+        attempts = []
+
+        def race(ref, candidate, expected, **kwargs):
+            if ref == self.c.sa.ref:
+                runtime.edit_task(self.c.sb, "competing-edit", "t", 2, title="Concurrent edit")
+            return push(ref, candidate, expected, **kwargs)
+
+        def interrupted(*args, **kwargs):
+            attempts.append(kwargs["operation_id"])
+            if len(attempts) == 1:
+                with patch.object(self.c.sa, "push", side_effect=race):
+                    return heartbeat(*args, **kwargs)
+            value = heartbeat(*args, **kwargs)
+            if len(attempts) == 2:
+                raise TaskError("Lost starting heartbeat reply")
+            return value
+
+        with patch.object(runtime, "heartbeat", side_effect=interrupted):
+            with self.assertRaisesRegex(TaskError, "Lost starting heartbeat reply"):
+                lifecycle.execute(self.c.sa, "t", "r", command)
+            result = lifecycle.execute(self.c.sa, "t", "r", command)
+        self.assertEqual(result["exit_code"], 0)
+        self.assertEqual(len(attempts), 3)
+        self.assertNotEqual(attempts[0], attempts[1])
+        self.assertEqual(attempts[1], attempts[2])
+
     def test_lost_renewal_reply_uses_receipt_without_extending_again(self):
         self.enable(); self.c.start()
         self.settings(now_ms=1100000, lose_reply=True)

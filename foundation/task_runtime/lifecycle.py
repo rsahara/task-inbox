@@ -8,7 +8,7 @@ import time
 import uuid
 
 from . import leases, runtime
-from .store import (CONTROL, Snapshot, TaskError, atomic_json, digest, encode, git,
+from .store import (CONTROL, Snapshot, SupersededRenewal, TaskError, atomic_json, digest, encode, git,
                     git_support, identity, now, refs_overlap)
 
 
@@ -60,8 +60,20 @@ def execute(store, task_id, run_id, command, *, worker_finish=False):
         store.transact(digest(["run-execution", task_id, run_id])[:48],
                        {"kind": "run-execution", "task_id": task_id, "run_id": run_id,
                         "launch_id": record["launch_id"]}, claim)
-        runtime.heartbeat(store, task_id, run_id, progress="starting",
-                          operation_id="execution-starting-" + record["launch_id"])
+        heartbeat_id = record.get("starting_heartbeat_id", "execution-starting-" + record["launch_id"])
+        for attempt in range(8):
+            try:
+                runtime.heartbeat(store, task_id, run_id, progress="starting", operation_id=heartbeat_id)
+                break
+            except SupersededRenewal:
+                # The original candidate provably lost its parent CAS. An
+                # unknown outcome must instead retain its saved operation ID.
+                runtime.check(store, task_id, run_id)
+                heartbeat_id = "execution-starting-" + uuid.uuid4().hex
+                record["starting_heartbeat_id"] = heartbeat_id
+                atomic_json(marker, record)
+                if attempt == 7:
+                    raise
         # Persist the point after which process creation may have happened.
         # Existing receipts used "launching" and also remain non-replayable.
         record.update(phase="launching")

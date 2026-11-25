@@ -251,7 +251,10 @@ cannot launch the same run, including before its first work checkpoint. If Git
 fails during claim or starting heartbeat, the original executor can repeat
 `exec` with the same command, Git directory and execution lock while the receipt
 is in `claiming`. Copying a receipt to a different clone cannot transfer this
-authorization. The retry reuses the same launch ID and authority transaction. Before a
+authorization. The retry reuses the same launch ID and authority transaction.
+An uncertain starting heartbeat keeps its operation ID. If a generation-timeout
+renewal definitively loses its Git compare-and-swap, the supervisor rechecks
+ownership and saves a new heartbeat operation ID before retrying. Before a
 worker could be created, the supervisor durably records `launching`. That phase,
 including older `launching` receipts, requires inspection and confirmed recovery;
 `exec` will not retry a possible spawn. Restoring a run's files does not grant
