@@ -1,5 +1,6 @@
 """Single-ref transactions, immutable Git objects, and durable push reconciliation."""
 from contextlib import contextmanager
+from contextvars import ContextVar
 from datetime import datetime, timezone
 import fcntl
 import hashlib
@@ -15,6 +16,31 @@ from . import git_support
 git = git_support.git
 GitFailure = git_support.GitFailure
 CONTROL = ".task-system"
+_heartbeat_read_retry = ContextVar("heartbeat_read_retry", default=False)
+
+
+@contextmanager
+def heartbeat_reads():
+    """Allow one extra read across all stores used by this heartbeat."""
+    token = _heartbeat_read_retry.set(True)
+    try:
+        yield
+    finally:
+        _heartbeat_read_retry.reset(token)
+
+
+def _read_remote(read, *args):
+    try:
+        return read(*args)
+    except GitFailure as error:
+        diagnostic = error.diagnostic
+        if (not _heartbeat_read_retry.get() or diagnostic.get("operation") not in ("fetch", "ls-remote")
+                or diagnostic.get("category") not in ("timeout", "unknown")
+                or diagnostic.get("signal") is not None):
+            raise
+        _heartbeat_read_retry.set(False)
+        time.sleep(0.25)
+        return read(*args)
 
 
 class TaskError(RuntimeError):
@@ -178,13 +204,13 @@ class Store:
                 yield
 
     def remote_tip(self, ref):
-        return self.transport.read_ref(ref)
+        return _read_remote(self.transport.read_ref, ref)
 
     def list_refs(self, prefixes):
-        return self.transport.list_refs(prefixes)
+        return _read_remote(self.transport.list_refs, prefixes)
 
     def fetch(self, ref=None, missing=False):
-        return self.transport.fetch(ref or self.ref, missing)
+        return _read_remote(self.transport.fetch, ref or self.ref, missing)
 
     def preflight(self):
         """Read-only capability declaration + ref/object-read checks, not an ACL certification."""
