@@ -247,10 +247,18 @@ stops its child group if heartbeat confirmation or authority checking fails.
 Raw output stays in local private log files, not Git or CLI JSON. A durable
 execution claim on the authority branch is consumed before spawning the worker;
 the local execution receipt additionally protects local replay. Another clone
-cannot launch the same run, including before its first work checkpoint. A crash
-after claiming but before spawning also retains the claim: inspect/recover and
-use a new run for another execution attempt. Do not delete receipts to retry a
-side effect. Restoring a run's files does not grant another execution attempt.
+cannot launch the same run, including before its first work checkpoint. If Git
+fails during claim or starting heartbeat, the original executor can repeat
+`exec` with the same command, Git directory and execution lock while the receipt
+is in `claiming`. Copying a receipt to a different clone cannot transfer this
+authorization. The retry reuses the same launch ID and authority transaction.
+An uncertain starting heartbeat keeps its operation ID. If a generation-timeout
+renewal definitively loses its Git compare-and-swap, the supervisor rechecks
+ownership and saves a new heartbeat operation ID before retrying. Before a
+worker could be created, the supervisor durably records `launching`. That phase,
+including older `launching` receipts, requires inspection and confirmed recovery;
+`exec` will not retry a possible spawn. Restoring a run's files does not grant
+another execution attempt.
 `exec` returning does not publish artifacts or finish the run.
 
 For an agent/executor that manages its own worker process, call `run check` before

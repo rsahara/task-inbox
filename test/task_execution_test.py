@@ -172,6 +172,27 @@ class ExecutionTest(fixtures.RuntimeCase):
         result = self.execute()
         self.assertEqual(result['steps'][0]['outcome'], 'succeeded')
 
+    def test_original_execute_resumes_before_spawn_after_git_recovers(self):
+        self.setup_tasks(); self.send()
+        original = self.sa.transact
+
+        def lose_launch_readback(operation_id, request, apply, **kwargs):
+            receipt = original(operation_id, request, apply, **kwargs)
+            if request['kind'] == 'run-execution':
+                raise TaskError('Execution claim readback unavailable')
+            return receipt
+
+        with patch.object(self.sa, 'transact', side_effect=lose_launch_readback):
+            with self.assertRaisesRegex(TaskError, 'claim readback unavailable'):
+                self.execute()
+        run = runtime.list_runs(self.sa.snapshot(), 't')[0]
+        self.assertEqual(run['status'], 'running')
+        self.assertEqual(self.execute(store=self.sb)['reason'], 'execution_outcome_unknown')
+        self.assertEqual(self.execute()['steps'], [dict(task_id='t', run_id=run['run_id'], outcome='succeeded')])
+        finished = runtime.list_runs(self.sa.snapshot(), 't')
+        self.assertEqual([row['run_id'] for row in finished], [run['run_id']])
+        self.assertEqual(finished[0]['execution_claim'], run['execution_claim'])
+
     def test_finish_failure_retries_after_worker_success_without_relaunch(self):
         self.setup_tasks(); self.send()
         original = runtime.publish
