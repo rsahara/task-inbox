@@ -441,6 +441,12 @@ class Store:
                     raise TaskError("Push outcome is unknown; retry operation " + operation_id) from None
                 confirmed = Snapshot(self, self.fetch())
                 found = confirmed.metadata(receipt_path)
+                if (not found and attempt < 7 and (tip is None or self.contains(confirmed.commit, tip))
+                        and not self.contains(confirmed.commit, candidate)):
+                    # The acknowledgement did not establish publication. Keep
+                    # the journal and re-enter the same receipt and CAS checks.
+                    time.sleep(min(0.02 * (attempt + 1), 0.15))
+                    continue
                 if not found or found["request_hash"] != fingerprint or not self.contains(confirmed.commit, candidate):
                     raise TaskError("Publication readback failed; retain operation " + operation_id)
                 state.update(done=True, receipt=found)

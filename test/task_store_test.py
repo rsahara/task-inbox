@@ -162,14 +162,56 @@ class StoreTest(RuntimeCase):
         self.assertEqual(self.git(self.a, 'for-each-ref', '--format=%(refname)', 'refs/task-runtime-pending/'), '')
         self.assertEqual(self.add()['id'], 't')
 
+    def test_missing_readback_retries_the_same_candidate_when_parent_is_unchanged(self):
+        push = self.sa.push
+        attempts = []
+
+        def acknowledge_without_pushing_once(ref, candidate, expected):
+            attempts.append((ref, candidate, expected))
+            if len(attempts) == 1:
+                return ''
+            return push(ref, candidate, expected)
+
+        with patch.object(self.sa, 'push', side_effect=acknowledge_without_pushing_once):
+            self.assertEqual(self.add()['id'], 't')
+        self.assertEqual(len(attempts), 2)
+        self.assertEqual(attempts[0], attempts[1])
+        self.assertEqual(self.sb.fetch(), attempts[0][1])
+
+    def test_missing_readback_rechecks_receipt_before_repeating_accepted_push(self):
+        parent = self.sa.fetch()
+        push, fetch = self.sa.push, self.sa.fetch
+        stale = False
+
+        def push_and_delay_visibility(*args):
+            nonlocal stale
+            result = push(*args)
+            stale = True
+            return result
+
+        def fetch_with_stale_readback(*args, **kwargs):
+            nonlocal stale
+            if stale:
+                stale = False
+                return parent
+            return fetch(*args, **kwargs)
+
+        with patch.object(self.sa, 'push', side_effect=push_and_delay_visibility) as sent, \
+                patch.object(self.sa, 'fetch', side_effect=fetch_with_stale_readback):
+            self.assertEqual(self.add()['id'], 't')
+        self.assertEqual(sent.call_count, 1)
+        self.assertEqual(self.sb.fetch(), sent.call_args.args[1])
+
     def test_readback_failure_retains_original_candidate_for_retry(self):
         before = self.sa.fetch()
-        with patch.object(self.sa, 'push', return_value=''):
+        with patch.object(self.sa, 'push', return_value='') as sent, patch('task_runtime.store.time.sleep'):
             with self.assertRaisesRegex(TaskError, 'readback failed'):
                 self.add()
         self.assertEqual(self.sb.fetch(), before)
         journal = json.loads((self.sa.local / 'operations/add-t.json').read_text())
         candidate = journal['pending']['candidate']
+        self.assertEqual(sent.call_count, 8)
+        self.assertEqual({call.args[1] for call in sent.call_args_list}, {candidate})
         self.assertEqual(self.add()['id'], 't')
         self.assertEqual(self.sb.fetch(), candidate)
 

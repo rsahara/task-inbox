@@ -330,10 +330,12 @@ branch. Lost responses are reconciled against the same receipt/candidate;
 another operation is never silently substituted. If main has advanced from the
 candidate's base without its receipt or candidate in history, its old conditional
 push can no longer succeed: the same request is revalidated against current main.
-Prepared publication output remains fixed. Unknown outcomes remain pending.
-Retry the same operation ID; preserve the journal when readback cannot establish
-the result. The branch
-must not be force-rewritten, and operation receipts must not be pruned by normal
+Prepared publication output remains fixed. When a successful push response
+lacks a visible receipt on readback, the transaction retries against the same
+journal within its normal retry limit. Each attempt checks the receipt before
+another push. If the limit is reached, the journal remains pending for a retry
+with the same operation ID. The branch must not be force-rewritten, and
+operation receipts must not be pruned by normal
 clients. This is a cooperative-writer protocol, not an authorization boundary
 against a writer able to arbitrarily rewrite repository history.
 
