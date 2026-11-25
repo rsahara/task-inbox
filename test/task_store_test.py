@@ -178,6 +178,34 @@ class StoreTest(RuntimeCase):
         self.assertEqual(attempts[0], attempts[1])
         self.assertEqual(self.sb.fetch(), attempts[0][1])
 
+    def test_opted_in_ambiguous_push_reuses_journal_and_candidate(self):
+        attempts = []
+        push = self.sa.push
+
+        def uncertain_then_accept(ref, candidate, expected):
+            attempts.append((ref, candidate, expected))
+            if len(attempts) == 1:
+                raise GitFailure('fixture lost response', {'definite_rejection': False})
+            return push(ref, candidate, expected)
+
+        with patch.object(self.sa, 'push', side_effect=uncertain_then_accept):
+            result = self.sa.transact('original', {'kind': 'progress'}, lambda snap: ({}, {'saved': True}),
+                                      retry_unconfirmed=True)
+        self.assertTrue(result['saved'])
+        self.assertEqual(len(attempts), 2)
+        self.assertEqual(attempts[0], attempts[1])
+        self.assertEqual(self.sb.fetch(), attempts[0][1])
+
+    def test_exhausted_ambiguous_push_keeps_original_request_pending(self):
+        error = GitFailure('fixture lost response', {'definite_rejection': False})
+        with patch.object(self.sa, 'push', side_effect=error) as sent, patch('task_runtime.store.time.sleep'):
+            with self.assertRaisesRegex(TaskError, 'unknown; retry operation original'):
+                self.sa.transact('original', {'kind': 'progress'}, lambda snap: ({}, {'saved': True}),
+                                 retry_unconfirmed=True)
+        self.assertEqual(sent.call_count, 8)
+        saved = json.loads((self.sa.local / 'operations/original.json').read_text())
+        self.assertEqual({call.args[1] for call in sent.call_args_list}, {saved['pending']['candidate']})
+
     def test_missing_readback_rechecks_receipt_before_repeating_accepted_push(self):
         parent = self.sa.fetch()
         push, fetch = self.sa.push, self.sa.fetch

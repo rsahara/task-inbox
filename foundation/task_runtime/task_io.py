@@ -398,7 +398,8 @@ def heartbeat(store, run, progress, operation_id):
         prior = snapshot.json('state.json', {})
         state = runtime.heartbeat_state(run, prior, progress)
         return {'state.json': encode(state)}, state
-    value = stream.transact(operation_id or uuid.uuid4().hex, dict(kind='io-heartbeat', progress=progress), apply)
+    value = stream.transact(operation_id or uuid.uuid4().hex, dict(kind='io-heartbeat', progress=progress),
+                            apply, retry_unconfirmed=True)
     runtime.check(store, run['task_id'], run['run_id'])
     return value
 
