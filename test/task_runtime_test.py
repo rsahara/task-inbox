@@ -400,6 +400,33 @@ class TaskRuntimeTest(RuntimeCase):
         with self.assertRaises(TaskError):
             runtime.heartbeat(self.sa, "t", "r")
 
+    def test_heartbeat_recovers_one_fetch_before_recording_progress(self):
+        self.add()
+        self.start()
+        fetch = self.sa.transport.fetch
+        calls = []
+        def transient(ref, missing=False):
+            calls.append(ref)
+            if len(calls) == 1:
+                raise GitFailure("fetch failed", dict(operation="fetch", category="unknown", definite_rejection=False))
+            return fetch(ref, missing)
+        with patch.object(self.sa.transport, "fetch", side_effect=transient):
+            result = runtime.heartbeat(self.sa, "t", "r", progress="running", operation_id="original-beat")
+        self.assertEqual(calls[:2], [self.sa.ref, self.sa.ref])
+        self.assertEqual((result["sequence"], result["operation_id"]), (1, "original-beat"))
+
+    def test_heartbeat_bounds_fetch_retry_and_preserves_permanent_errors(self):
+        for category, attempts in [("timeout", 2), ("authentication", 1), ("policy_denied", 1)]:
+            with self.subTest(category=category):
+                error = GitFailure("fetch failed", dict(operation="fetch", category=category, definite_rejection=False))
+                with patch.object(self.sa.transport, "fetch", side_effect=error) as fetch:
+                    with self.assertRaises(GitFailure):
+                        runtime.heartbeat(self.sa, "t", "r")
+                    self.assertEqual(fetch.call_count, attempts)
+                    with self.assertRaises(GitFailure):
+                        self.sa.fetch()
+                    self.assertEqual(fetch.call_count, attempts + 1)
+
     def test_staleness_uses_observed_sha_and_monotonic_elapsed_time(self):
         self.add(recovery_mode="git_only")
         self.start()

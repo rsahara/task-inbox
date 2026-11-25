@@ -6,7 +6,7 @@ import socket
 import time
 import uuid
 
-from .store import (CONTROL, Snapshot, SupersededRenewal, TaskError, atomic_json, digest, encode, git,
+from .store import (CONTROL, Snapshot, SupersededRenewal, TaskError, atomic_json, digest, encode, git, heartbeat_reads,
                     identity, now, refs_overlap, safe_path)
 
 
@@ -813,6 +813,7 @@ def heartbeat_state(run, previous=None, progress=None, *, initial=False):
                 updated_at=now(), progress=progress if progress is not None else previous.get('progress'))
 
 
+@heartbeat_reads()
 def heartbeat(store, task_id, run_id, *, progress=None, operation_id=None):
     from . import leases, task_io
     # Lease renewal uses the authority transaction, independently of the

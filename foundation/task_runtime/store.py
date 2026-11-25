@@ -1,5 +1,6 @@
 """Single-ref transactions, immutable Git objects, and durable push reconciliation."""
 from contextlib import contextmanager
+from contextvars import ContextVar
 from datetime import datetime, timezone
 import fcntl
 import hashlib
@@ -15,6 +16,17 @@ from . import git_support
 git = git_support.git
 GitFailure = git_support.GitFailure
 CONTROL = ".task-system"
+_heartbeat_fetch_retry = ContextVar("heartbeat_fetch_retry", default=False)
+
+
+@contextmanager
+def heartbeat_reads():
+    """Allow one extra read across all stores used by this heartbeat."""
+    token = _heartbeat_fetch_retry.set(True)
+    try:
+        yield
+    finally:
+        _heartbeat_fetch_retry.reset(token)
 
 
 class TaskError(RuntimeError):
@@ -184,7 +196,18 @@ class Store:
         return self.transport.list_refs(prefixes)
 
     def fetch(self, ref=None, missing=False):
-        return self.transport.fetch(ref or self.ref, missing)
+        target = ref or self.ref
+        try:
+            return self.transport.fetch(target, missing)
+        except GitFailure as error:
+            diagnostic = error.diagnostic
+            if (not _heartbeat_fetch_retry.get() or diagnostic.get("operation") != "fetch"
+                    or diagnostic.get("category") not in ("timeout", "unknown")
+                    or diagnostic.get("signal") is not None):
+                raise
+            _heartbeat_fetch_retry.set(False)
+            time.sleep(0.25)
+            return self.transport.fetch(target, missing)
 
     def preflight(self):
         """Read-only capability declaration + ref/object-read checks, not an ACL certification."""
