@@ -2,6 +2,7 @@
 import json
 import os
 from pathlib import Path
+import socket
 import subprocess
 import time
 import uuid
@@ -14,28 +15,41 @@ from .store import (CONTROL, Snapshot, TaskError, atomic_json, digest, encode, g
 def execute(store, task_id, run_id, command, *, worker_finish=False):
     """Heartbeats run in the supervisor, independently of a long child command.
 
-    The supervisor never auto-restarts the child after losing its own process.
-    Replayed execution requires explicit inspection, unlike replayed acquisition.
+    A retry can reconcile the same claim until the supervisor enters the spawn
+    boundary. Once a child could have been started, inspection is required.
     """
+    command = [command] if isinstance(command, (str, bytes, os.PathLike)) else list(command)
     if not command:
         raise TaskError("A command is required after --")
     state_path = runtime.local_state(store, task_id, run_id)
     marker = state_path.with_suffix(".execution.json")
-    with store.lock(state_path.with_suffix(".execution.lock")):
+    lock = state_path.with_suffix(".execution.lock")
+    with store.lock(lock):
         run = runtime.check(store, task_id, run_id)
         if run.get("continuation"):
             raise TaskError("A checkpoint continuation is delivery-only; do not execute its old computation")
         if not state_path.exists():
             raise TaskError("Prepare the run workspace first")
         state = json.loads(state_path.read_text())
+        lock_stat = lock.stat()
+        executor = digest([socket.gethostname(), str(store.common), lock_stat.st_dev, lock_stat.st_ino])
+        command_hash = digest([[os.fsencode(arg).hex() for arg in command], worker_finish])
         if marker.exists():
-            raise TaskError("This run already launched a command; inspect its execution receipt")
-        record = {"run_id": run_id, "generation": run["generation"], "phase": "launching",
-                  "launch_id": uuid.uuid4().hex, "started_at": now()}
-        atomic_json(marker, record)
+            record = json.loads(marker.read_text())
+            if record.get("phase") != "claiming":
+                raise TaskError("This run already launched a command or crossed the launch boundary; inspect its execution receipt")
+            if (record.get("run_id") != run_id or record.get("generation") != run["generation"]
+                    or record.get("executor") != executor or record.get("command_hash") != command_hash):
+                raise TaskError("Retry the original execution claim on the same executor with the same run and command")
+            identity(record.get("launch_id"), "launch ID")
+        else:
+            record = {"run_id": run_id, "generation": run["generation"], "phase": "claiming",
+                      "launch_id": uuid.uuid4().hex, "executor": executor, "command_hash": command_hash,
+                      "started_at": now()}
+            atomic_json(marker, record)
         # The local marker alone cannot exclude a second clone. Consume one
-        # durable launch right before any worker process is created. A crash
-        # between this commit and spawn is intentionally not auto-replayed.
+        # durable launch right before any worker process is created. The same
+        # local claimant can replay the original transaction while still claiming.
         def claim(snapshot):
             current = runtime.load_run(snapshot, task_id, run_id, live=True)[2]
             if current.get("execution_claim"):
@@ -46,7 +60,12 @@ def execute(store, task_id, run_id, command, *, worker_finish=False):
         store.transact(digest(["run-execution", task_id, run_id])[:48],
                        {"kind": "run-execution", "task_id": task_id, "run_id": run_id,
                         "launch_id": record["launch_id"]}, claim)
-        runtime.heartbeat(store, task_id, run_id, progress="starting")
+        runtime.heartbeat(store, task_id, run_id, progress="starting",
+                          operation_id="execution-starting-" + record["launch_id"])
+        # Persist the point after which process creation may have happened.
+        # Existing receipts used "launching" and also remain non-replayable.
+        record.update(phase="launching")
+        atomic_json(marker, record)
         # Register before spawn, and use the existing cancellation/process-group
         # owner for the worker and its descendants as well as Git children.
         owner = git_support.ProcessOwner()

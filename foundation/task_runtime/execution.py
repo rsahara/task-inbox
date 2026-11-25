@@ -233,7 +233,7 @@ def execute(store, execution_id, task_ids, runner, executor, *, condition_adapte
             context_path, result_path = directory / 'context.json', directory / 'result.json'
             marker = runtime.local_state(store, task_id, run_id).with_suffix('.execution.json')
             execution = json.loads(marker.read_text()) if marker.is_file() else None
-            if current.get('execution_claim') and not (execution and execution['phase'] == 'exited'):
+            if current.get('execution_claim') and not (execution and execution['phase'] in ('claiming', 'exited')):
                 reason, attention = 'execution_outcome_unknown', True
                 steps.append(dict(task_id=task_id, run_id=run_id, outcome='unknown'))
                 break
@@ -246,6 +246,7 @@ def execute(store, execution_id, task_ids, runner, executor, *, condition_adapte
                                result_path=str(result_path), run=current,
                                task_path=runtime.root(task_id, current), input_plan=choice['plan'])
                 atomic_json(context_path, context)
+            if not execution or execution['phase'] == 'claiming':
                 execution = lifecycle.execute(store, task_id, run_id, [program, str(context_path)])
             if execution['phase'] != 'exited' or execution.get('exit_code') != 0:
                 reason, attention = 'executor_failed_or_interrupted', True

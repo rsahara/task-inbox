@@ -857,7 +857,7 @@ class TaskRuntimeTest(RuntimeCase):
             lifecycle.execute(self.sb, "t", "r", command)
         self.assertEqual(launched.read_text(), "launch\n")
 
-    def test_execution_claim_is_retained_if_owner_disappears_before_spawn(self):
+    def test_original_workspace_recovers_execution_claim_after_lost_readback(self):
         self.add()
         self.start()
         self.prepare()
@@ -872,8 +872,51 @@ class TaskRuntimeTest(RuntimeCase):
             lifecycle.execute(self.sa, "t", "r", command)
         with self.assertRaises(TaskError):
             lifecycle.execute(self.sb, "t", "r", command)
+        original_marker = runtime.local_state(self.sa, "t", "r").with_suffix(".execution.json")
+        other_marker = runtime.local_state(self.sb, "t", "r").with_suffix(".execution.json")
+        other_marker.write_bytes(original_marker.read_bytes())
+        with self.assertRaisesRegex(TaskError, "same executor"):
+            lifecycle.execute(self.sb, "t", "r", command)
         self.assertFalse(launched.exists())
-        self.assertIn("execution_claim", runtime.check(self.sb, "t", "r"))
+        claim = runtime.check(self.sb, "t", "r")["execution_claim"]
+        with self.assertRaisesRegex(TaskError, "same run and command"):
+            lifecycle.execute(self.sa, "t", "r", command + ["different"])
+        heartbeat = runtime.heartbeat
+
+        def lose_heartbeat_reply(*args, **kwargs):
+            heartbeat(*args, **kwargs)
+            raise TaskError("Starting heartbeat readback unavailable")
+
+        with patch.object(runtime, "heartbeat", side_effect=lose_heartbeat_reply) as missed:
+            with self.assertRaisesRegex(TaskError, "heartbeat readback unavailable"):
+                lifecycle.execute(self.sa, "t", "r", command)
+        self.assertFalse(launched.exists())
+        self.assertEqual(missed.call_args.kwargs["operation_id"], "execution-starting-" + claim["launch_id"])
+        result = lifecycle.execute(self.sa, "t", "r", command)
+        self.assertEqual(result["exit_code"], 0)
+        self.assertEqual(result["launch_id"], claim["launch_id"])
+        self.assertTrue(launched.exists())
+        with self.assertRaises(TaskError):
+            lifecycle.execute(self.sa, "t", "r", command)
+
+    def test_launch_boundary_never_replays_a_potential_spawn(self):
+        self.add()
+        self.start()
+        self.prepare()
+        launched = self.base / "launches"
+        command = [sys.executable, "-c", "from pathlib import Path; import sys; Path(sys.argv[1]).touch()", str(launched)]
+
+        def stop_at_boundary(path, record):
+            atomic_json(path, record)
+            if record["phase"] == "launching":
+                raise TaskError("Supervisor stopped next to spawn")
+
+        with patch.object(lifecycle, "atomic_json", side_effect=stop_at_boundary):
+            with self.assertRaisesRegex(TaskError, "stopped next to spawn"):
+                lifecycle.execute(self.sa, "t", "r", command)
+        with self.assertRaisesRegex(TaskError, "crossed the launch boundary"):
+            lifecycle.execute(self.sa, "t", "r", command)
+        self.assertFalse(launched.exists())
 
     def test_initialization_rejects_authority_inside_runtime_ref_namespace(self):
         original = self.sa.remote_tip(self.sa.ref)
