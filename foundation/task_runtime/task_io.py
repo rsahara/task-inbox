@@ -33,9 +33,10 @@ def prefix(config):
 
 class IOStore(Store):
     """Reuse Store's CAS, receipts and ambiguous-push reconciliation with a data manifest."""
-    def __init__(self, authority, task_id, run=None):
+    def __init__(self, authority, task_id, run=None, *, config=None):
         self.authority, self.run = authority, run
-        config = authority.snapshot().json(CONTROL + '/config.json')
+        if config is None:
+            config = authority.snapshot().json(CONTROL + '/config.json')
         task_id = identity(task_id, 'task ID')
         branch = prefix(config) + '/' + task_id + ('/runs/' + identity(run['run_id']) if run else '/inbox')
         if run and (run.get('io_ref') != 'refs/heads/' + branch or run.get('heartbeat_ref') != run['io_ref']):
@@ -390,8 +391,8 @@ def status(store, task_id, message_id):
     return dict(message=original, receipt=receipt, status=state)
 
 
-def heartbeat(store, run, progress, operation_id):
-    stream = IOStore(store, run['task_id'], run)
+def heartbeat(store, run, progress, operation_id, *, config=None):
+    stream = IOStore(store, run['task_id'], run, config=config)
     stream.ensure()
     def apply(snapshot):
         runtime.check(store, run['task_id'], run['run_id'])

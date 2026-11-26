@@ -388,7 +388,10 @@ class TaskRuntimeTest(RuntimeCase):
         run = self.start()
         before = self.sa.fetch()
         self.assertEqual(runtime.heartbeat(self.sa, "t", "r")["sequence"], 1)
-        self.assertEqual(runtime.heartbeat(self.sa, "t", "r")["sequence"], 2)
+        with patch.object(self.sa, 'snapshot', wraps=self.sa.snapshot) as main_snapshot:
+            self.assertEqual(runtime.heartbeat(self.sa, "t", "r")["sequence"], 2)
+        # Read main at entry and on each side of the stream CAS.
+        self.assertEqual(main_snapshot.call_count, 3)
         self.assertEqual(before, self.sa.fetch())
         heartbeat = Snapshot(self.sa, self.sa.fetch(run["heartbeat_ref"]))
         self.assertEqual(heartbeat.json(CONTROL + '/config.json')['stream'], 'run')

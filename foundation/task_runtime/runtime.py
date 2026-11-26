@@ -818,7 +818,8 @@ def heartbeat(store, task_id, run_id, *, progress=None, operation_id=None):
     from . import leases, task_io
     # Lease renewal uses the authority transaction, independently of the
     # detailed heartbeat ref. A fresh renewal gets a fresh operation identity.
-    current = load_run(store.snapshot(), task_id, run_id, live=True)[2]
+    snapshot = store.snapshot()
+    current = load_run(snapshot, task_id, run_id, live=True)[2]
     if current["execution"]["recovery_mode"] in leases.MODES:
         for attempt in range(8):
             try:
@@ -829,7 +830,7 @@ def heartbeat(store, task_id, run_id, *, progress=None, operation_id=None):
                 # proves the previous one can never win. Explicit IDs stay fixed.
                 if operation_id or attempt == 7:
                     raise
-    return task_io.heartbeat(store, current, progress, operation_id)
+    return task_io.heartbeat(store, current, progress, operation_id, config=snapshot.json(CONTROL + '/config.json'))
 
 
 def observer_boot():
