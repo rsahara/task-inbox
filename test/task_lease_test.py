@@ -26,7 +26,8 @@ class LeaseCase(unittest.TestCase):
         self.settings_path.write_text(json.dumps({"key": "test-only-clock-proof", "now_ms": 1000000}))
         self.c.sa = Store(self.c.a, transport_adapter=str(self.adapter))
         self.c.sb = Store(self.c.b, transport_adapter=str(self.adapter))
-        self.c.add()
+        # The fixture authority grants a five-minute lease.
+        self.c.add(heartbeat_seconds=60)
 
     def settings(self, **changes):
         current = json.loads(self.settings_path.read_text())
@@ -209,7 +210,7 @@ class LeaseTests(LeaseCase):
     def test_metadata_retirement_accepts_migration_to_a_noncolliding_io_prefix(self):
         store = Store(self.c.a, branch='task-io', transport_adapter=str(self.adapter))
         runtime.initialize(store, 'other-authority')
-        runtime.add_task(store, 'other-task', task_id='t', title='Task')
+        runtime.add_task(store, 'other-task', task_id='t', title='Task', heartbeat_seconds=60)
         leases.configure(store, 'other-policy', 't', 1, mode=self.mode, profile='test', drained=True)
         runtime.start(store, 'other-start', 't', 'runner', run_id='r')
         runtime.prepare(store, 't', 'r', self.c.base / 'other-work')

@@ -97,11 +97,11 @@ class ScenarioTests(RuntimeCase):
         self.assertEqual(first['observation_reset'], 'first_observation')
         with self.assertRaisesRegex(TaskError, 'runner limit'):
             self.start('too-soon', task='task-a', store=self.sb)
-        self.assertFalse(self.reap_at('task-a', 399)['runs'][0]['stale'])
+        self.assertFalse(self.reap_at('task-a', 1299)['runs'][0]['stale'])
         self.assertEqual(self.active('task-a'), ['old'])
 
         # Expiry releases ownership, but does not prove that output is disposable.
-        expired = self.reap_at('task-a', 400)
+        expired = self.reap_at('task-a', 1300)
         self.assertFalse(expired['needs_attention'])
         self.assertEqual(expired['runs'], [{'run_id': 'old', 'status': 'lost'}])
         cleanup = self.sb.snapshot().json('tasks/task-a/runs/old/cleanup.json')
@@ -132,7 +132,7 @@ class ScenarioTests(RuntimeCase):
         run = self.event(worker, 'checkpoint')['run']
         self.kill(worker)
         self.reap_at('task-a', 100)
-        with patch.object(runtime, 'time', SimpleNamespace(monotonic=lambda: 400)):
+        with patch.object(runtime, 'time', SimpleNamespace(monotonic=lambda: 1300)):
             self.assertTrue(runtime.observe(self.sb, 'task-a', 'old')['stale'])
         # Before revoking the run, a verified stop permits restoring its checkpoint
         # and adopting the output in a failed finish. Lost runs cannot be restored.
@@ -230,7 +230,7 @@ class ScenarioTests(RuntimeCase):
         self.kill(first)  # The child section runs in the same process; no children remain.
         self.assertFalse(self.reap_at('task-b', 100)['runs'][0]['stale'])
         self.assertEqual(self.active('task-b'), ['child-first'])
-        self.assertEqual(self.reap_at('task-b', 400)['runs'],
+        self.assertEqual(self.reap_at('task-b', 1300)['runs'],
                          [{'run_id': 'child-first', 'status': 'lost'}])
         successor = self.event(second, 'acquired')['run']
         self.assertEqual(successor['generation'], acquired['generation'] + 1)

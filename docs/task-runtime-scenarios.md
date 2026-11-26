@@ -31,8 +31,8 @@ their worker fixture.
 
 The tests replace only the observer's monotonic clock, keeping subprocess, Git
 and lock deadlines real. An initial observation at 100 seconds starts the
-300-second unchanged-ref window. At 399 seconds the run is still owned; at 400 it
-is eligible for Git-only recovery. They do not wait five real minutes or infer
+1,200-second unchanged-ref window. At 1,299 seconds the run is still owned. At
+1,300 it is eligible for Git-only recovery. They do not wait 20 real minutes or infer
 death from a Git commit timestamp. A retained observer is required for this
 policy. Ordinary `run start` does not automatically reap Git-only runs; the caller
 must invoke `run reap --apply`. Manual recovery requires verified stop evidence.

@@ -366,7 +366,11 @@ checkpoints retain work history for recovery. Schema 11 publish/finish snapshots
 business files without changing the worker's HEAD or index.
 Heartbeat liveness and useful work progress are different signals.
 
-Defaults are a 60-second heartbeat and a 300-second unchanged-ref threshold.
+New tasks default to a heartbeat every 5 minutes and become stale after 20 minutes
+of observing an unchanged heartbeat ref. Override either interval in seconds with
+`task add --heartbeat-seconds` and `--stale-seconds`. Existing tasks retain their
+stored intervals, and each run pins the task's settings at admission. When retrying
+an older task creation by operation ID, pass the original intervals explicitly.
 Git commit dates are not server receipt times. The observer measures an unchanged
 remote SHA with its own monotonic clock; the first observation starts a waiting
 period. Linux observation caches are tied to kernel boot identity. On systems
@@ -420,7 +424,7 @@ identities. A superficial `cancelled` label is insufficient. No cloud-specific
 adapter is bundled; companies implement this contract against their own executor.
 Unknown/false fields, mismatched identities, malformed output, failure or timeout
 keep ownership and return an actionable blocked/unknown status. Checks can run
-before age thresholds, so a verified cancellation need not wait five minutes.
+as soon as stop evidence is available, even before the stale threshold.
 The adapter's evidence is a trusted assertion, not independently proven by Git.
 
 Recovery marks the old run `lost`, records evidence/cleanup retention and releases
@@ -482,8 +486,8 @@ records cleanup phases on main, but creates no source tag. Accepted artifacts an
 task data remain in the current tree. Older I/O runs without saved records on main retain their
 stream for explicit migration; existing tags remain readable and are not purged.
 
-Heartbeat histories create roughly 1,440 commits per active run/day at a 60-second
-interval. Timed recovery additionally renews the authority and creates operation
+Heartbeat histories create roughly 288 commits per continuously active run per day
+at the default five-minute interval. Timed recovery additionally renews the authority and creates operation
 receipts. Cleanup does not change that policy or force host Git garbage collection.
 
 ## Existing installations and feedback coverage

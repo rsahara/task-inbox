@@ -277,7 +277,7 @@ class RecoveryDiagnosticsTests(unittest.TestCase):
         for number in range(4):
             path = c.base / ("fresh-" + str(number))
             c.command("git", "clone", str(c.remote), str(path))
-            with patch.object(runtime, "observer_boot", return_value=str(number)), patch.object(runtime.time, "monotonic", return_value=100 + 900 * number):
+            with patch.object(runtime, "observer_boot", return_value=str(number)), patch.object(runtime.time, "monotonic", return_value=100 + 1300 * number):
                 result = lifecycle.reap(Store(path), "t", apply=True, observer_profile="stateless")
             self.assertTrue(result["needs_attention"])
             self.assertEqual(result["runs"][0]["status"], "recovery_policy_required")
@@ -307,7 +307,7 @@ class RecoveryDiagnosticsTests(unittest.TestCase):
         with patch.object(runtime.time, "monotonic", return_value=100):
             first = lifecycle.reap(c.sb, "t", apply=True, observer_profile="retained")
         self.assertFalse(first["needs_attention"])
-        with patch.object(runtime.time, "monotonic", return_value=401):
+        with patch.object(runtime.time, "monotonic", return_value=1300):
             second = lifecycle.reap(c.sb, "t", apply=True, observer_profile="retained")
         self.assertEqual(second["runs"][0]["status"], "lost")
 
@@ -329,7 +329,7 @@ class RecoveryDiagnosticsTests(unittest.TestCase):
         with patch.object(runtime.time, "monotonic", return_value=100):
             lifecycle.reap(c.sb, "t", apply=True, observer_profile="retained")
         runtime.heartbeat(c.sa, "t", "r")
-        with patch.object(runtime.time, "monotonic", return_value=1000):
+        with patch.object(runtime.time, "monotonic", return_value=1400):
             renewed = lifecycle.reap(c.sb, "t", apply=True, observer_profile="retained")
         self.assertEqual(renewed["runs"][0]["observation_reset"], "heartbeat_changed")
         self.assertFalse(renewed["runs"][0]["stale"])

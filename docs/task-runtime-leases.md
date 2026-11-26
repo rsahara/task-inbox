@@ -50,7 +50,11 @@ receives `task_id` and returns `contract`, for example:
 }
 ```
 
-These numbers illustrate a profile; they are not runtime defaults. Operators
+The example five-minute TTL accommodates a task created with
+`--heartbeat-seconds 60`. A task using the default five-minute heartbeat needs a
+longer TTL that also covers the adapter's clock and request margins.
+
+Operators
 provision profiles and permitted tasks outside the repository. `effects` is:
 
 - `authority_only`: accepted mutable output is exclusively an authority transaction.
