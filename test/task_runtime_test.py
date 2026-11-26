@@ -448,12 +448,14 @@ class TaskRuntimeTest(RuntimeCase):
                     self.assertEqual(fetch.call_count, attempts + 1)
 
     def test_staleness_uses_observed_sha_and_monotonic_elapsed_time(self):
-        self.add(recovery_mode="git_only")
+        task = self.add(recovery_mode="git_only")
+        self.assertEqual(task["execution"]["heartbeat_seconds"], 300)
+        self.assertEqual(task["execution"]["stale_seconds"], 1200)
         self.start()
         runtime.heartbeat(self.sa, "t", "r")
         with patch("task_runtime.runtime.time.monotonic", return_value=100):
             self.assertFalse(runtime.observe(self.sb, "t", "r")["stale"])
-        with patch("task_runtime.runtime.time.monotonic", return_value=401):
+        with patch("task_runtime.runtime.time.monotonic", return_value=1300):
             self.assertTrue(runtime.observe(self.sb, "t", "r")["stale"])
             runtime.recover(self.sb, "reap", "t", "r", stale=True)
         self.assertEqual(runtime.load_run(self.sa.snapshot(), "t", "r")[2]["status"], "lost")
@@ -466,9 +468,9 @@ class TaskRuntimeTest(RuntimeCase):
         with patch("task_runtime.runtime.time.monotonic", return_value=100):
             runtime.observe(self.sb, "t", "r")
         runtime.heartbeat(self.sa, "t", "r")
-        with patch("task_runtime.runtime.time.monotonic", return_value=1000):
+        with patch("task_runtime.runtime.time.monotonic", return_value=1400):
             self.assertFalse(runtime.observe(self.sb, "t", "r")["stale"])
-        with patch("task_runtime.runtime.time.monotonic", return_value=2000), patch("task_runtime.runtime.observer_boot", return_value="new-boot"):
+        with patch("task_runtime.runtime.time.monotonic", return_value=2800), patch("task_runtime.runtime.observer_boot", return_value="new-boot"):
             self.assertFalse(runtime.observe(self.sb, "t", "r")["stale"])
 
     def test_manual_external_run_cannot_be_recovered_only_by_age(self):
@@ -476,7 +478,7 @@ class TaskRuntimeTest(RuntimeCase):
         self.start()
         with patch("task_runtime.runtime.time.monotonic", return_value=100):
             runtime.observe(self.sb, "t", "r")
-        with patch("task_runtime.runtime.time.monotonic", return_value=1000), self.assertRaises(TaskError):
+        with patch("task_runtime.runtime.time.monotonic", return_value=1400), self.assertRaises(TaskError):
             runtime.recover(self.sb, "reap", "t", "r", stale=True)
         with self.assertRaises(TaskError):
             runtime.recover(self.sb, "unconfirmed", "t", "r", stopped=True, evidence="fixture:stop")
@@ -626,7 +628,7 @@ class TaskRuntimeTest(RuntimeCase):
         runtime.prepare(self.sb, "t", "r", self.b, "workspace")
         with patch("task_runtime.runtime.time.monotonic", return_value=100):
             runtime.observe(self.sa, "t", "r")
-        with patch("task_runtime.runtime.time.monotonic", return_value=401):
+        with patch("task_runtime.runtime.time.monotonic", return_value=1300):
             runtime.recover(self.sa, "recover-stale", "t", "r", stale=True)
         self.git(self.b, "reset", "--hard", self.sb.fetch())
         self.start("next", store=self.sb)

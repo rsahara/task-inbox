@@ -10,6 +10,10 @@ from .store import (CONTROL, Snapshot, SupersededRenewal, TaskError, atomic_json
                     identity, now, refs_overlap, safe_path)
 
 
+DEFAULT_HEARTBEAT_SECONDS = 300
+DEFAULT_STALE_SECONDS = 1200
+
+
 def root(task_id, source=None):
     identity(task_id, "task ID")
     if isinstance(source, Snapshot):
@@ -174,8 +178,8 @@ def initialize(store, operation_id, *, index=None, task_root=None):
 
 
 def add_task(store, operation_id, *, title, task_id=None, body="", max_runners=1,
-             recovery_mode="manual", heartbeat_seconds=60, stale_seconds=300, priority=3, path=None, data_path=None,
-             interface=None):
+             recovery_mode="manual", heartbeat_seconds=DEFAULT_HEARTBEAT_SECONDS,
+             stale_seconds=DEFAULT_STALE_SECONDS, priority=3, path=None, data_path=None, interface=None):
     task_id = identity(task_id or operation_id, "task ID")
     positive(max_runners, "max_runners", 1024)
     positive(heartbeat_seconds, "heartbeat interval")

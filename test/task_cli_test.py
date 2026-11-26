@@ -36,6 +36,8 @@ class CliTest(RuntimeCase):
                                         '--body-file', str(body), '--priority', '2', '--max-runners', '2',
                                         operation='cli-add')
         self.assertEqual((task['priority'], task['execution']['max_runners']), (2, 2))
+        self.assertEqual(task['execution']['heartbeat_seconds'], 300)
+        self.assertEqual(task['execution']['stale_seconds'], 1200)
         self.assertEqual(diagnostics, [{'operation_id': 'cli-add'}])
         shown, diagnostics = self.invoke('task', 'show', '--id', 't')
         self.assertEqual(shown['body'], body.read_text())
@@ -55,6 +57,13 @@ class CliTest(RuntimeCase):
         shown, _ = self.invoke('task', 'show', '--id', 't')
         self.assertEqual(shown['body'], 'Updated instructions')
         self.assertIsNone(shown['task']['archived_at'])
+
+    def test_explicit_heartbeat_and_stale_intervals_are_pinned_to_the_run(self):
+        self.invoke('task', 'add', '--id', 't', '--title', 'Task', '--heartbeat-seconds', '60',
+                    '--stale-seconds', '300', operation='legacy-intervals')
+        run = self.start()
+        self.assertEqual(run['execution']['heartbeat_seconds'], 60)
+        self.assertEqual(run['execution']['stale_seconds'], 300)
 
     def test_inbox_run_completion_and_cleanup_commands_work_across_clones(self):
         self.add()

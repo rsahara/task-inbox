@@ -60,7 +60,11 @@ with these capability fields for a CAS-only provider:
 }
 ```
 
-The profile values are examples, not production defaults. `coordinated_writers`
+The example five-minute TTL accommodates a task created with
+`--heartbeat-seconds 60`. A task using the default five-minute heartbeat needs a
+longer TTL that also covers the adapter's clock and request margins.
+
+`coordinated_writers`
 declares an installed, drained, cooperative writer deployment; it does not claim
 that ordinary Git validates application semantics or rejects a privileged raw
 force push. Older/uncoordinated writers must not retain admission rights.

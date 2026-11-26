@@ -80,8 +80,10 @@ def parser():
     add.add_argument("--priority", type=int, default=3)
     add.add_argument("--max-runners", type=int, default=1)
     add.add_argument("--recovery-mode", choices=("manual", "git_only"), default="manual")
-    add.add_argument("--heartbeat-seconds", type=int, default=60)
-    add.add_argument("--stale-seconds", type=int, default=300)
+    add.add_argument("--heartbeat-seconds", type=int, default=runtime.DEFAULT_HEARTBEAT_SECONDS,
+                     help="Seconds between heartbeats (default: %(default)s)")
+    add.add_argument("--stale-seconds", type=int, default=runtime.DEFAULT_STALE_SECONDS,
+                     help="Seconds to observe an unchanged heartbeat before marking it stale (default: %(default)s)")
     listing = task.add_parser("list")
     listing.add_argument("--all", action="store_true")
     show = task.add_parser("show")
