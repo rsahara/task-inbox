@@ -154,9 +154,9 @@ class Snapshot:
         data = self.read(path)
         return default if data is None else json.loads(data)
 
-    def metadata_snapshot(self, path):
+    def metadata_snapshot(self, path, *, since=None):
         """Read retired runtime metadata from the append-only authority history."""
-        since = self.store.issued_receipts.get(path)
+        since = since or self.store.issued_receipts.get(path)
         if (path in self.entries or not self.commit or self.commit == since
                 or self.json(CONTROL + '/config.json', {}).get('schema_version', 0) < 6):
             return self
@@ -164,7 +164,8 @@ class Snapshot:
         self.store.require_history()
         if not hasattr(self, '_metadata_snapshots'):
             self._metadata_snapshots = {}
-        if path not in self._metadata_snapshots:
+        key = (path, since)
+        if key not in self._metadata_snapshots:
             # A merge's first parent can hold a stale running record. Read the
             # original retirement commit, including those on merged branches.
             changed = git(self.store.repo, 'log', '--full-history', '--no-merges',
@@ -172,8 +173,8 @@ class Snapshot:
                           self.commit, *(['^' + since] if since else []), '--', ':(literal)' + path)
             parents = git(self.store.repo, 'rev-list', '--parents', '-n', '1', changed).split() if changed else []
             previous = Snapshot(self.store, parents[1]) if len(parents) > 1 else self
-            self._metadata_snapshots[path] = previous
-        return self._metadata_snapshots[path]
+            self._metadata_snapshots[key] = previous
+        return self._metadata_snapshots[key]
 
     def metadata(self, path, default=None):
         return self.metadata_snapshot(path).json(path, default)

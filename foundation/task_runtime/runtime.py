@@ -66,15 +66,10 @@ def run_metadata_snapshot(snapshot, task_id, run_id, name):
                 git(snapshot.store.repo, 'diff', '--quiet', issued, snapshot.commit,
                     '--', ':(literal)' + registry, ':(literal)' + location + '/task.json', predicate=True)):
             return snapshot, current
-        # A competing admission or move warrants a check only within this ID's lifetime.
-        if not git(snapshot.store.repo, 'log', '-m', '--full-history', '--no-renames',
-                   '-1', '--format=%H', snapshot.commit, '^' + issued, '--',
-                   ':(glob)**/runs/' + run_id + '/run.json'):
-            return snapshot, current
     def locate(tree, location):
         prefix = location + '/runs/' + identity(run_id, 'run ID')
         candidate = prefix + '/' + name
-        located = tree.metadata_snapshot(candidate)
+        located = tree.metadata_snapshot(candidate, since=issued)
         if candidate in located.entries:
             if name == 'run.json':
                 owner = located.json(candidate)
@@ -88,7 +83,7 @@ def run_metadata_snapshot(snapshot, task_id, run_id, name):
     if found is not None:
         return found
     from . import layout
-    for location, previous in layout.previous_locations(snapshot, task_id):
+    for location, previous in layout.previous_locations(snapshot, task_id, since=issued):
         found = locate(previous, location)
         if found is not None:
             return found

@@ -46,17 +46,6 @@ class DiscoveredLayoutTest(fixtures.RuntimeCase):
             with self.assertRaises(TaskError):
                 runtime.add_task(self.sa, 'bad-' + str(number), task_id='t', title='Task', path=location)
 
-    def move_task(self, destination, task_id='t'):
-        def move(snapshot):
-            source = runtime.root(task_id, snapshot)
-            changes = {}
-            for name in snapshot.entries:
-                if name.startswith(source + '/'):
-                    changes[destination + name[len(source):]] = snapshot.read(name)
-                    changes[name] = None
-            return changes, {}
-        self.sa.transact('move-' + task_id, {'kind': 'fixture-move', 'destination': destination}, move)
-
     def test_drained_move_preserves_retired_run_history_and_new_output_location(self):
         self.add()
         self.start('old')
@@ -68,6 +57,7 @@ class DiscoveredLayoutTest(fixtures.RuntimeCase):
             self.sa.transact('retire-old', {'kind': 'fixture-retire'}, lambda snapshot: ({path: None}, {}))
         self.move_task('tasks/t-readable')
         snapshot = self.sb.snapshot()
+        self.assertEqual(layout.previous_locations(snapshot, 't', since=snapshot.commit), [])
         with patch.object(layout, 'git', side_effect=TimeoutError), self.assertRaises(TimeoutError):
             layout.previous_locations(snapshot, 't')
         self.assertEqual(runtime.load_run(snapshot, 't', 'old')[2], old)

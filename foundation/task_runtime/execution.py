@@ -1,4 +1,5 @@
 """Caller-owned execution entrypoint; tasks describe work, never their executor."""
+from contextlib import ExitStack
 import hashlib
 import json
 import os
@@ -189,7 +190,7 @@ def execute(store, execution_id, task_ids, runner, executor, *, condition_adapte
     store.transact(operation(execution_id, 'begin'), request, lambda snapshot: ({}, {'execution_id': execution_id}))
     steps, used = [], []
     reason, attention = 'limit_reached', False
-    with store.lock(store.local / ('execute-' + digest(execution_id) + '.lock')):
+    with store.lock(store.local / ('execute-' + digest(execution_id) + '.lock')), ExitStack() as lifetime:
         for index in range(limit):
             signals.sync(store)
             choice = select(store, execution_id, index, task_ids, condition_adapter=checker,
@@ -201,6 +202,7 @@ def execute(store, execution_id, task_ids, runner, executor, *, condition_adapte
             issued_at = choice['plan']['commit']
             start_id, finish_id = 'start-' + run_id, 'finish-' + run_id
             store.remember_allocation(run_id, issued_at, operation_prefix='start-')
+            lifetime.callback(store.issued_ids.pop, run_id, None)
             store.bind_new_operation(finish_id, issued_at)
 
             def recheck(snapshot):
@@ -222,6 +224,8 @@ def execute(store, execution_id, task_ids, runner, executor, *, condition_adapte
                     raise
                 reason = 'busy'
                 break
+            # start releases its issuance bound. The selected run may already be retired.
+            store.issued_ids[run_id] = issued_at
             current = runtime.load_run(store.snapshot(), task_id, run_id)[2]
             if (current['generation'], current['runner_id']) != (admitted['generation'], admitted['runner_id']):
                 raise TaskError('Run ownership differs from the saved execution admission')

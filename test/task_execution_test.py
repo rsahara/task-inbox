@@ -9,7 +9,7 @@ from unittest.mock import patch
 
 import task_runtime_test as fixtures
 import task_lease_test as shared
-from task_runtime import execution, git_support, interfaces, leases, lifecycle, runtime, signals, task_io
+from task_runtime import execution, git_support, interfaces, leases, lifecycle, maintenance, runtime, signals, task_io
 from task_runtime.store import CONTROL, GitFailure, TaskError, atomic_json, digest
 
 
@@ -100,13 +100,23 @@ class ExecutionTest(fixtures.RuntimeCase):
     def test_completed_selection_replays_without_a_new_lease_check(self):
         self.setup_tasks(); self.send()
         expected = self.execute('saved')['steps']
+        run_id = expected[0]['run_id']
+        maintenance.retire_metadata(self.sa, 't', run_id, apply=True)
+        self.assertNotIn(runtime.run_path('t', run_id) + '/run.json', self.sa.snapshot().entries)
+        self.move_task('tasks/t-renamed')
         guard = leases.guard
         def unavailable_for_new_admission(store, snapshot, request):
             if request['kind'] == 'run-start':
                 raise TaskError('Trusted clock unavailable for a new admission')
             return guard(store, snapshot, request)
-        with patch.object(leases, 'guard', side_effect=unavailable_for_new_admission):
+        with patch.object(leases, 'guard', side_effect=unavailable_for_new_admission), \
+                patch.object(git_support, 'run_process', wraps=git_support.run_process) as commands:
             self.assertEqual(self.execute('saved', store=self.sb)['steps'], expected)
+        searches = [call.args[0] for call in commands.call_args_list if '--full-history' in call.args[0]
+                    and (run_id in call.args[0][-1] or call.args[0][-1] == ':(glob)tasks/*/task.json')]
+        self.assertTrue(searches)
+        self.assertTrue(all(any(arg.startswith('^') for arg in args) for args in searches), searches)
+        self.assertNotIn(run_id, self.sb.issued_ids)
 
     def test_resumed_selection_never_adopts_another_start_with_the_same_run_id(self):
         self.setup_tasks(); self.send()

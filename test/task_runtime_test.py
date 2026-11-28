@@ -84,6 +84,17 @@ class RuntimeCase(unittest.TestCase):
     def add(self, task="t", **kwargs):
         return runtime.add_task(self.sa, "add-" + task, title="Task " + task, task_id=task, body="Instructions", **kwargs)
 
+    def move_task(self, destination, task_id='t'):
+        def move(snapshot):
+            source = runtime.root(task_id, snapshot)
+            changes = {}
+            for name in snapshot.entries:
+                if name.startswith(source + '/'):
+                    changes[destination + name[len(source):]] = snapshot.read(name)
+                    changes[name] = None
+            return changes, {}
+        self.sa.transact('move-' + task_id, {'kind': 'fixture-move', 'destination': destination}, move)
+
     def start(self, run="r", task="t", store=None, **kwargs):
         return runtime.start(store or self.sa, "start-" + run, task, "runner-" + run, run_id=run, machine_id="fixture", **kwargs)
 
