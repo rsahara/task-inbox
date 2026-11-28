@@ -111,6 +111,23 @@ class ExecutionTest(fixtures.RuntimeCase):
         finished = self.sb.snapshot().metadata(f'{CONTROL}/operations/{finish_id}.json')
         self.assertEqual(finished['result']['run_id'], run_id)
 
+    def test_older_writer_can_admit_a_new_selection_and_the_new_writer_can_finish_it(self):
+        self.setup_tasks(); self.send()
+        with patch.object(runtime, 'start', side_effect=TaskError('Interrupted before start')), \
+                self.assertRaisesRegex(TaskError, 'Interrupted before start'):
+            self.execute('mixed')
+        selected = execution.operation('mixed', 'select', 0)
+        choice = self.sa.snapshot().metadata(f'{CONTROL}/operations/{selected}.json')['result']
+        run_id = choice['run_id']
+        legacy_start = execution.operation('mixed', 'start', 0)
+        runtime.start(self.sb, legacy_start, 't', 'worker', run_id=run_id,
+                      admission_key=selected, admission_check=lambda snapshot: None)
+        expected = [dict(task_id='t', run_id=run_id, outcome='succeeded')]
+        self.assertEqual(self.execute('mixed')['steps'], expected)
+        self.assertEqual(self.execute('mixed', store=self.sb)['steps'], expected)
+        finish = execution.operation('mixed', 'finish', 0)
+        self.assertEqual(self.sa.snapshot().metadata(f'{CONTROL}/operations/{finish}.json')['result']['run_id'], run_id)
+
     def test_resumed_selection_never_adopts_another_start_with_the_same_run_id(self):
         self.setup_tasks(); self.send()
         with patch.object(runtime, 'start', side_effect=TaskError('Interrupted before start')), \

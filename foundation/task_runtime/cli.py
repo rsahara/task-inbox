@@ -196,7 +196,7 @@ def dispatch(args):
             raise TaskError('Saved CLI admission differs from the requested operation')
         store.remember_allocation(operation, saved['allocation_commit'], operation_prefix='')
     result = dispatch_operation(args, store, operation, io_snapshot)
-    if not result.get('needs_attention'):
+    if not result.get('needs_attention') and result.get('action') not in ('busy', 'paused'):
         intent.unlink(missing_ok=True)
     return result
 

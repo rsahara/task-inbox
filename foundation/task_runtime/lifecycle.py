@@ -25,7 +25,7 @@ def execute(store, task_id, run_id, command, *, worker_finish=False):
     marker = state_path.with_suffix(".execution.json")
     lock = state_path.with_suffix(".execution.lock")
     with store.lock(lock):
-        snapshot, run = runtime.checked_run_snapshot(store, task_id, run_id)
+        run = runtime.check(store, task_id, run_id)
         if run.get("continuation"):
             raise TaskError("A checkpoint continuation is delivery-only; do not execute its old computation")
         if not state_path.exists():
@@ -42,12 +42,9 @@ def execute(store, task_id, run_id, command, *, worker_finish=False):
                     or record.get("executor") != executor or record.get("command_hash") != command_hash):
                 raise TaskError("Retry the original execution claim on the same executor with the same run and command")
             identity(record.get("launch_id"), "launch ID")
-            if "claim_operation" in record:
-                store.bind_new_operation(record["claim_operation"], run["definition_commit"])
         else:
-            claim_operation = store.new_id(snapshot.commit, prefix="execution-claim-")
             record = {"run_id": run_id, "generation": run["generation"], "phase": "claiming",
-                      "launch_id": claim_operation.removeprefix("execution-claim-"), "claim_operation": claim_operation,
+                      "launch_id": uuid.uuid4().hex,
                       "executor": executor, "command_hash": command_hash,
                       "started_at": now()}
             atomic_json(marker, record)
@@ -61,8 +58,9 @@ def execute(store, task_id, run_id, command, *, worker_finish=False):
             current["execution_claim"] = {"launch_id": record["launch_id"], "claimed_at": now(),
                                           "generation": current["generation"]}
             return {runtime.run_path(task_id, run_id, snapshot) + "/run.json": encode(current)}, current["execution_claim"]
-        # Older claiming markers resume their original per-run transaction.
-        operation_id = record.get("claim_operation") or digest(["run-execution", task_id, run_id])[:48]
+        operation_id = digest(["run-execution", task_id, run_id])[:48]
+        if run.get("allocation_commit"):
+            store.bind_new_operation(operation_id, run["allocation_commit"])
         store.transact(operation_id,
                        {"kind": "run-execution", "task_id": task_id, "run_id": run_id,
                         "launch_id": record["launch_id"]}, claim)

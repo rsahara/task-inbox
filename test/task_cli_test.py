@@ -127,6 +127,18 @@ class CliTest(RuntimeCase):
         self.assertTrue(sent['accepted'])
         self.assertEqual(event['id'], 'one')
 
+    def test_busy_wake_retries_after_the_original_slot_is_released(self):
+        self.add(); self.start(); self.prepare()
+        arguments = ('io', 'wake', '--task', 't', '--runner', 'next', '--force')
+        busy, diagnostics = self.invoke(*arguments, operation=None)
+        self.assertEqual(busy['action'], 'busy')
+        operation = diagnostics[0]['operation_id']
+        runtime.publish(self.sa, 'finish-r', 't', 'r', outcome='succeeded')
+        with patch.object(git_support, 'run_process', wraps=git_support.run_process) as commands:
+            result, _ = self.invoke(*arguments, operation=operation)
+        self.assertEqual(result['run']['run_id'], operation)
+        self.assertEqual(unbounded_receipt_searches(commands, operation), [])
+
     def test_inbox_run_completion_and_cleanup_commands_work_across_clones(self):
         self.add()
         payload = self.base / 'payload.json'

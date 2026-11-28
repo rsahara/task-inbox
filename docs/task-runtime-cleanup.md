@@ -39,7 +39,8 @@ can restore this bound on retry. Caller-supplied IDs and older intents retain
 historical replay and collision checks, including after a task moves or a run is retired.
 For automatically generated `run start`, `io wake` and `execute` IDs, the CLI saves the
 allocation commit in the clone before printing the ID. A retry in that clone
-uses the saved bound until the admission or execution is confirmed. A clone
+uses the saved bound until the admission or execution is confirmed. A busy or
+paused wake keeps its ID for retry. An idle wake completes its poll. A clone
 without the local intent can reconcile the same ID from authority history.
 Fresh IDs rely on randomness for uniqueness before issuance. Retired records
 can be recovered without a permanent per-run receipt or tag.

@@ -339,7 +339,8 @@ def start(store, operation_id, task_id, runner_id, *, run_id=None, machine_id=No
     initial = store.snapshot()
     if (has_reapable_slots(initial, task_id) and
             not (store.local / "operations" / (identity(operation_id) + ".json")).exists() and
-            not initial.metadata(CONTROL + "/operations/" + operation_id + ".json")):
+            not initial.metadata(CONTROL + "/operations/" + operation_id + ".json") and
+            (admission_check is None or run_record(initial, task_id, run_id) is None)):
         from . import lifecycle
         lifecycle.reap(store, task_id, apply=True, observer_profile="stateless")
     def apply(snapshot):
@@ -385,6 +386,8 @@ def start(store, operation_id, task_id, runner_id, *, run_id=None, machine_id=No
                "data_hash": snapshot.content_hash(data_prefix(task, task_id, root(task_id, snapshot))),
                "publication_count": 0, "artifact_manifest": {}, "cleanup_protocol": 2,
                "workspace_origin_id": None, "workspace_history_unobserved": False}
+        if run_id in store.issued_ids:
+            run['allocation_commit'] = store.issued_ids[run_id]
         effective_contract = completion_contract if completion_contract is not None else task.get('completion_contract')
         if effective_contract is not None:
             if resume_from is not None:

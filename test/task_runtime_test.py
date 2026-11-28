@@ -898,9 +898,10 @@ class TaskRuntimeTest(RuntimeCase):
 
     def test_lost_execution_claim_reply_does_not_allow_another_clone_to_launch(self):
         self.add()
-        self.start()
-        self.prepare()
-        runtime.prepare(self.sb, "t", "r", self.base / "other-work")
+        run_id = self.sa.new_id(self.sa.fetch(), operation_prefix='start-')
+        self.start(run=run_id)
+        self.prepare(run=run_id)
+        runtime.prepare(self.sb, "t", run_id, self.base / "other-work")
         launched = self.base / "launches"
         command = [sys.executable, "-c",
                    "from pathlib import Path; import sys\n"
@@ -912,13 +913,14 @@ class TaskRuntimeTest(RuntimeCase):
                 raise GitFailure("lost response", {"definite_rejection": False})
         with patch.object(self.sa, "push", side_effect=lose_reply), \
                 patch.object(git_support, "run_process", wraps=git_support.run_process) as commands:
-            executed = lifecycle.execute(self.sa, "t", "r", command)
+            executed = lifecycle.execute(self.sa, "t", run_id, command)
         self.assertEqual(executed["exit_code"], 0)
-        operation = executed["claim_operation"]
-        paths = {f":(literal){CONTROL}/operations/{key}.json" for key in (operation, reservation_id(operation))}
-        self.assertFalse(any("log" in call.args[0] and call.args[0][-1] in paths for call in commands.call_args_list))
+        operation = digest(["run-execution", "t", run_id])[:48]
+        receipt = self.sa.snapshot().metadata(f'{CONTROL}/operations/{operation}.json')
+        self.assertEqual(receipt['result']['launch_id'], executed['launch_id'])
+        self.assertEqual(unbounded_receipt_searches(commands, operation), [])
         with self.assertRaises(TaskError):
-            lifecycle.execute(self.sb, "t", "r", command)
+            lifecycle.execute(self.sb, "t", run_id, command)
         self.assertEqual(launched.read_text(), "launch\n")
 
     def test_original_workspace_recovers_execution_claim_after_lost_readback(self):
@@ -929,14 +931,10 @@ class TaskRuntimeTest(RuntimeCase):
         launched = self.base / "launches"
         command = [sys.executable, "-c", "from pathlib import Path; import sys; Path(sys.argv[1]).touch()", str(launched)]
         original = self.sa.transact
-        def save_legacy_marker(path, record):
-            record.pop("claim_operation", None)
-            atomic_json(path, record)
         def disappear(*args, **kwargs):
             original(*args, **kwargs)
             raise TaskError("Owner disappeared after claiming execution")
-        with patch.object(lifecycle, "atomic_json", side_effect=save_legacy_marker), \
-                patch.object(self.sa, "transact", side_effect=disappear), self.assertRaises(TaskError):
+        with patch.object(self.sa, "transact", side_effect=disappear), self.assertRaises(TaskError):
             lifecycle.execute(self.sa, "t", "r", command)
         with self.assertRaises(TaskError):
             lifecycle.execute(self.sb, "t", "r", command)

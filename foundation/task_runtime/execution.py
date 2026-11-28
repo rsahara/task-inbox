@@ -168,6 +168,41 @@ def worker_result(path, run):
     return value
 
 
+def admit_selection(store, choice, execution_id, index, runner, check, contract):
+    task_id, run_id = choice['task_id'], choice['run_id']
+    legacy_start = operation(execution_id, 'start', index)
+    legacy_finish = operation(execution_id, 'finish', index)
+
+    def admit(key):
+        return runtime.start(store, key, task_id, runner, run_id=run_id,
+                             admission_check=check, admission_key=operation(execution_id, 'select', index),
+                             completion_contract=contract)
+
+    if 'start_operation' not in choice:
+        return admit(legacy_start), legacy_finish
+    issued_at = choice['plan']['commit']
+    store.remember_allocation(run_id, issued_at)
+    for key in (choice['start_operation'], choice['finish_operation']):
+        store.bind_new_operation(key, issued_at)
+    try:
+        return admit(choice['start_operation']), choice['finish_operation']
+    except TaskError as error:
+        if (not str(error).startswith('Execution admission changed: ')
+                and str(error) not in ('Run ID already exists; replay the original operation ID',
+                                       'Task is not open for new runs')):
+            raise
+        # An older writer can finish this selection under its invocation-derived ID.
+        # Prove that receipt exists before replaying its exact request.
+        snapshot, path = runtime.run_metadata_snapshot(store.snapshot(), task_id, run_id, 'run.json')
+        if path not in snapshot.entries:
+            raise
+        receipt = snapshot.metadata(f'{CONTROL}/operations/{legacy_start}.json')
+        if not receipt or receipt['result'].get('run_id') != run_id:
+            raise
+        store.bind_new_operation(legacy_start, issued_at)
+        return admit(legacy_start), legacy_finish
+
+
 def execute(store, execution_id, task_ids, runner, executor, *, condition_adapter=None,
             force=False, completion_contracts=None):
     identity(execution_id, 'execution ID')
@@ -202,15 +237,6 @@ def execute(store, execution_id, task_ids, runner, executor, *, condition_adapte
             if task_id is None:
                 reason = 'no_ready_task'
                 break
-            if 'start_operation' in choice:
-                start_id, finish_id = choice['start_operation'], choice['finish_operation']
-                issued_at = choice['plan']['commit']
-                store.remember_allocation(run_id, issued_at)
-                for key in (start_id, finish_id):
-                    store.bind_new_operation(key, issued_at)
-            else:
-                start_id = operation(execution_id, 'start', index)
-                finish_id = operation(execution_id, 'finish', index)
             def recheck(snapshot):
                 decision = plan(store, [task_id], condition_adapter=checker,
                                 force=force and index == 0 and task_id == task_ids[0],
@@ -219,9 +245,8 @@ def execute(store, execution_id, task_ids, runner, executor, *, condition_adapte
                     raise TaskError('Execution admission changed: ' + decision['reason'])
 
             try:
-                admitted = runtime.start(store, start_id, task_id, runner, run_id=run_id,
-                                         admission_check=recheck, admission_key=operation(execution_id, 'select', index),
-                                         completion_contract=contracts.get(task_id))
+                admitted, finish_id = admit_selection(store, choice, execution_id, index, runner,
+                                                      recheck, contracts.get(task_id))
             except TaskError as error:
                 if str(error).startswith('Execution admission changed: '):
                     reason = str(error).split(': ', 1)[1]

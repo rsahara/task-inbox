@@ -183,6 +183,8 @@ Selection saves the allocated run ID, its admission and finish operation IDs,
 and the input plan at the allocation commit. A retry reuses these IDs and can
 limit their lookup to the run's lifetime, even with a caller-supplied execution
 ID. Earlier selections retain their original invocation-derived operation IDs.
+If an older writer admits a newer selection, its invocation-derived start
+receipt identifies that admission and the corresponding finish operation.
 Each execution reconciles its own start receipt before using the selected run,
 even if a run with the same ID already exists.
 
