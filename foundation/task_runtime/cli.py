@@ -6,7 +6,7 @@ import sys
 import uuid
 
 from . import VERSION, completion, execution, leases, lifecycle, reports, runtime, task_io, signals
-from .store import GitFailure, Store, TaskError, encode, identity
+from .store import GitFailure, Store, TaskError, atomic_json, encode, identity
 
 
 def parser():
@@ -162,23 +162,65 @@ def parser():
     return p
 
 
+def report_operation(operation_id):
+    print(json.dumps({"operation_id": operation_id}), file=sys.stderr, flush=True)
+
+
 def dispatch(args):
     store = Store(args.repo, args.remote, args.branch, transport_adapter=args.transport_adapter)
     if args.command == "transport-check":
         return store.preflight()
-    operation = identity(args.operation_id or uuid.uuid4().hex, "operation ID")
+    operation = identity(args.operation_id, "operation ID") if args.operation_id else None
+    generated = operation is None
+    admission = ((args.command == 'run' and args.action == 'start')
+                 or (args.command == 'io' and args.action == 'wake')
+                 or (args.command == 'execute' and not args.check))
+    io_snapshot = None
+    if generated and args.command == 'io' and args.action in ('send', 'complete', 'emit', 'wake'):
+        io_snapshot = store.snapshot()
+        operation = store.new_id(io_snapshot.commit)
+    if not admission:
+        return dispatch_operation(args, store, operation, io_snapshot)
+
+    if operation is None:
+        operation = store.new_id()
+    intent = store.local / 'cli-admissions' / args.command / (operation + '.json')
+    if generated and operation in store.issued_ids:
+        atomic_json(intent, dict(operation_id=operation, allocation_commit=store.issued_ids[operation]))
+    else:
+        try:
+            saved = json.loads(intent.read_text())
+        except FileNotFoundError:
+            return dispatch_operation(args, store, operation, io_snapshot)
+        if saved.get('operation_id') != operation:
+            raise TaskError('Saved CLI admission differs from the requested operation')
+        store.remember_allocation(operation, saved['allocation_commit'], operation_prefix='')
+    result = dispatch_operation(args, store, operation, io_snapshot)
+    if not result.get('needs_attention') and result.get('action') not in ('busy', 'paused'):
+        intent.unlink(missing_ok=True)
+    return result
+
+
+def dispatch_operation(args, store, operation, io_snapshot):
+    if args.command == 'execute' and args.check:
+        return execution.plan(store, args.task, condition_adapter=args.condition_adapter, force=args.force)
+    if args.command == 'run' and args.action == 'heartbeat' and operation is None:
+        return runtime.heartbeat(store, args.task, args.run_id, progress=args.progress,
+                                 on_new_operation=report_operation)
+    # Always expose a generated request identity before a remote mutation, so
+    # an interrupted CLI can be retried without guessing another request ID.
+    mutation = args.command in ("init", "execute") or args.action in ("add", "edit", "start", "publish", "finish", "recover", "cleanup", "activate", "recovery-policy", "renew", "checkpoint", "deliver-checkpoint", "heartbeat", "completion", 'send', 'complete', 'wake', 'emit', 'enable', 'subscribe', 'put', 'sync', 'migrate')
+    if mutation:
+        if operation is None:
+            local_only = ((args.command == 'signal' and args.action in ('put', 'sync'))
+                          or (args.command == 'run' and args.action == 'cleanup'
+                              and (not args.apply or args.metadata_only)))
+            operation = uuid.uuid4().hex if local_only else store.new_id()
+        report_operation(operation)
     if args.command == 'execute':
-        if args.check:
-            return execution.plan(store, args.task, condition_adapter=args.condition_adapter, force=args.force)
-        print(json.dumps({'operation_id': operation}), file=sys.stderr, flush=True)
         return execution.execute(store, operation, args.task, args.runner, args.executor,
                                  condition_adapter=args.condition_adapter, force=args.force,
                                  completion_contracts=json.loads(Path(args.completion_contracts_file).read_text()) if args.completion_contracts_file else None)
-    # Always expose a generated request identity before a remote mutation, so
-    # an interrupted CLI can be retried without guessing another request ID.
-    mutation = args.command == "init" or args.action in ("add", "edit", "start", "publish", "finish", "recover", "cleanup", "activate", "recovery-policy", "renew", "checkpoint", "deliver-checkpoint", "heartbeat", "completion", 'send', 'complete', 'wake', 'emit', 'enable', 'subscribe', 'put', 'sync', 'migrate')
-    if mutation:
-        print(json.dumps({"operation_id": operation}), file=sys.stderr, flush=True)
     if args.command == "init":
         return runtime.initialize(store, operation, index=args.index, task_root=args.task_root)
     if args.command == 'signal':
@@ -198,18 +240,19 @@ def dispatch(args):
                                    subscriptions=json.loads(Path(args.subscriptions_file).read_text()) if args.subscriptions_file else None)
         if args.action == 'send':
             return task_io.send(store, operation, args.task, args.message_id, args.kind,
-                                json.loads(Path(args.payload_file).read_text()))
+                                json.loads(Path(args.payload_file).read_text()), authority=io_snapshot)
         if args.action == 'pending':
             return task_io.pending(store, args.task)
         if args.action == 'status':
             return task_io.status(store, args.task, args.message_id)
         if args.action == 'complete':
             return task_io.complete(store, operation, args.task, args.run_id, args.message_id,
-                                  json.loads(Path(args.result_file).read_text()))
+                                    json.loads(Path(args.result_file).read_text()), authority=io_snapshot)
         if args.action == 'emit':
             return task_io.emit(store, operation, args.task, args.run_id, args.event_id, args.kind,
-                                json.loads(Path(args.payload_file).read_text()))
-        return task_io.wake(store, operation, args.task, args.runner, args.run_id, force=args.force)
+                                json.loads(Path(args.payload_file).read_text()), authority=io_snapshot)
+        return task_io.wake(store, operation, args.task, args.runner, args.run_id,
+                            force=args.force, authority=io_snapshot)
     if args.command == "task":
         if args.action == "recovery-policy":
             return leases.configure(store, operation, args.id, args.expected_revision, mode=args.mode,

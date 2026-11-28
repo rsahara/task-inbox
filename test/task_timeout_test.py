@@ -175,9 +175,13 @@ class TimeoutTests(shared.LeaseCase):
                 changed = True
                 runtime.edit_task(self.c.sb, "edit", "t", 2, title="Concurrent task edit")
             return push(ref, candidate, expected, **kwargs)
-        with patch.object(self.c.sa, "push", side_effect=race):
+        with patch.object(self.c.sa, "push", side_effect=race), \
+                patch.object(leases, "renew", wraps=leases.renew) as renew:
             runtime.heartbeat(self.c.sa, "t", "r")
         self.assertTrue(changed)
+        first, second = (call.args[1] for call in renew.call_args_list)
+        self.assertNotEqual(first, second)
+        self.assertNotIn(second, self.c.sa.issued_ids)
         self.assertEqual(runtime.check(self.c.sa, "t", "r")["lease"]["expires_ms"], 1400000)
 
     def test_starting_heartbeat_recovers_from_superseded_then_unknown_renewal(self):

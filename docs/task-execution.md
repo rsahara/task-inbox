@@ -179,7 +179,11 @@ selection decisions use ordinary immutable authority operation receipts, without
 an additional dispatch queue or claim database. The begin receipt binds the task
 selection, runner and adapter file hashes. Changing an
 adapter or policy requires reconciling that invocation before using a new one.
-Selection gives each step deterministic admission and finish operation IDs.
+Selection saves a random run ID and the input plan at its allocation commit.
+Admission and finish use `start-<run_id>` and `finish-<run_id>`. Retries
+reconcile the original start receipt before using the run and search only
+its lifetime, even with a caller-supplied execution ID. Finish outstanding
+invocations with their current writer, then switch all writers together.
 
 A previously finished step is read back, its signal delivery and normal cleanup
 are reconciled, and it is never relaunched. A surviving local

@@ -166,12 +166,13 @@ def bounded(value):
     return copy.deepcopy(value)
 
 
-def send(store, operation_id, task_id, message_id, kind, payload):
-    runtime.load_task(store.snapshot(), task_id)  # A paused task can still receive requests.
+def send(store, operation_id, task_id, message_id, kind, payload, *, authority=None):
+    authority = authority or store.snapshot()
+    runtime.load_task(authority, task_id)  # A paused task can still receive requests.
     identity(message_id, 'message ID'); identity(kind, 'message kind')
     message = dict(schema_version=1, id=message_id, kind=kind, payload=bounded(payload))
     from . import main_io
-    if main_io.enabled(store.snapshot()):
+    if main_io.enabled(authority):
         result = store.transact(operation_id, dict(kind='io-send', task_id=task_id, message=message),
             lambda snapshot: (main_io.append(snapshot, task_id, message), message))
         return dict(result, message_id=message_id, task_id=task_id, ref=store.ref,
@@ -262,13 +263,14 @@ def _result(store, operation_id, task_id, run_id, message_id, value):
     return dict(ref=stream.ref, commit=saved.commit, path=path, result_sha256=digest(record))
 
 
-def emit(store, operation_id, task_id, run_id, event_id, kind, payload):
+def emit(store, operation_id, task_id, run_id, event_id, kind, payload, *, authority=None):
     """Immutable run events include external-operation intents and their reconciled outcomes."""
-    run = runtime.check(store, task_id, run_id)
+    authority = authority or store.snapshot()
+    run = runtime.check(store, task_id, run_id, snapshot=authority)
     event = dict(schema_version=1, id=identity(event_id), kind=identity(kind), payload=bounded(payload),
                  task_id=task_id, run_id=run_id, generation=run['generation'])
     from . import main_io
-    if main_io.enabled(store.snapshot()):
+    if main_io.enabled(authority):
         path = runtime.run_path(task_id, run_id, run) + '/io/events/' + event_id + '.json'
         def accept(snapshot):
             runtime.load_run(snapshot, task_id, run_id, live=True)
@@ -308,11 +310,11 @@ def _receipt(store, task_id, run_id, message_id, run):
                    result_path=path, result_sha256=digest(record))
 
 
-def complete(store, operation_id, task_id, run_id, message_id, value):
+def complete(store, operation_id, task_id, run_id, message_id, value, *, authority=None):
     """Save a candidate and accept it with one caller-owned retry identity."""
     identity(operation_id, 'operation ID')
     from . import main_io
-    if main_io.enabled(store.snapshot()):
+    if main_io.enabled(authority or store.snapshot()):
         request = dict(kind='run-io-complete', task_id=task_id, run_id=run_id,
                        message_id=message_id, result=value)
         def accept(snapshot):
@@ -405,9 +407,9 @@ def heartbeat(store, run, progress, operation_id, *, config=None):
     return value
 
 
-def wake(store, operation_id, task_id, runner_id, run_id=None, *, force=False):
+def wake(store, operation_id, task_id, runner_id, run_id=None, *, force=False, authority=None):
     """Admission only: the caller executes task.md when action=start is returned."""
-    task, active = runtime.load_task(store.snapshot(), task_id)
+    task, active = runtime.load_task(authority or store.snapshot(), task_id)
     if task['execution']['max_runners'] != 1:
         raise TaskError('Inbox consumers require max_runners=1; run streams support parallel producers')
     from . import signals

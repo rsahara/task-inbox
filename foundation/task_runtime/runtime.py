@@ -50,11 +50,26 @@ def run_metadata_snapshot(snapshot, task_id, run_id, name):
     safe_path(name)
     if '/' in name:
         raise TaskError('Run metadata must be a file name')
-    current = run_path(task_id, run_id, snapshot) + '/' + name
+    location = root(task_id, snapshot)
+    prefix = location + '/runs/' + identity(run_id, 'run ID') + '/'
+    current = prefix + name
+    if name != 'run.json' and current not in snapshot.entries:
+        owner = snapshot.json(prefix + 'run.json', {})
+        if owner.get('status') == 'running' and owner.get('task_id') == task_id and owner.get('run_id') == run_id:
+            return snapshot, current
+    issued = snapshot.store.issued_ids.get(run_id)
+    if issued and current not in snapshot.entries and name == 'run.json':
+        registry = location + '/runtime.json'
+        # Every admission increments a slot generation, even if the run and its
+        # receipts have since been retired. Other tasks may advance authority.
+        if issued == snapshot.commit or (registry in snapshot.entries and
+                git(snapshot.store.repo, 'diff', '--quiet', issued, snapshot.commit,
+                    '--', ':(literal)' + registry, ':(literal)' + location + '/task.json', predicate=True)):
+            return snapshot, current
     def locate(tree, location):
         prefix = location + '/runs/' + identity(run_id, 'run ID')
         candidate = prefix + '/' + name
-        located = tree.metadata_snapshot(candidate)
+        located = tree.metadata_snapshot(candidate, since=issued)
         if candidate in located.entries:
             if name == 'run.json':
                 owner = located.json(candidate)
@@ -64,11 +79,11 @@ def run_metadata_snapshot(snapshot, task_id, run_id, name):
             if owner and owner.get('task_id') == task_id and owner.get('run_id') == run_id:
                 return located, candidate
         return None
-    found = locate(snapshot, root(task_id, snapshot))
+    found = locate(snapshot, location)
     if found is not None:
         return found
     from . import layout
-    for location, previous in layout.previous_locations(snapshot, task_id):
+    for location, previous in layout.previous_locations(snapshot, task_id, since=issued):
         found = locate(previous, location)
         if found is not None:
             return found
@@ -317,14 +332,16 @@ def start(store, operation_id, task_id, runner_id, *, run_id=None, machine_id=No
     # remote state alone. A replay only reads its historical receipt: it must
     # never mutate another generation while reconciling an old start.
     initial = store.snapshot()
-    initial_task = initial.json(root(task_id, initial) + "/task.json")
-    if (not initial.metadata(CONTROL + "/operations/" + identity(operation_id) + ".json") and
-            initial_task and initial_task["execution"]["recovery_mode"] in leases.MODES and
-            not (store.local / "operations" / (operation_id + ".json")).exists()):
+    if (has_reapable_slots(initial, task_id) and
+            not (store.local / "operations" / (identity(operation_id) + ".json")).exists() and
+            not initial.metadata(CONTROL + "/operations/" + operation_id + ".json")):
         from . import lifecycle
         lifecycle.reap(store, task_id, apply=True, observer_profile="stateless")
     def apply(snapshot):
         task, runtime = load_task(snapshot, task_id)
+        record_path = run_path(task_id, run_id, snapshot) + "/run.json"
+        if record_path in snapshot.entries:
+            raise TaskError("Run ID already exists; replay the original operation ID")
         if admission_check is not None:
             admission_check(snapshot)
         config = snapshot.json(CONTROL + "/config.json")
@@ -384,14 +401,26 @@ def start(store, operation_id, task_id, runner_id, *, run_id=None, machine_id=No
         if config['schema_version'] < 9:
             runtime['slots'][free].update(runner_id=runner_id, machine_id=machine_id)
         changes.update({root(task_id, snapshot) + "/runtime.json": encode(runtime),
-                        run_path(task_id, run_id, snapshot) + "/run.json": encode(run)})
+                        record_path: encode(run)})
         return changes, run
-    return store.transact(operation_id, request, apply)
+    admitted = store.transact(operation_id, request, apply)
+    store.issued_ids.pop(run_id, None)
+    return admitted
 
 
-def check(store, task_id, run_id):
+def has_reapable_slots(snapshot, task_id):
     from . import leases
-    snapshot = store.snapshot()
+    location = root(task_id, snapshot)
+    active = snapshot.json(location + '/runtime.json', {}).get('slots', {})
+    if not any(slot.get('run_id') for slot in active.values()):
+        return False
+    task = snapshot.json(location + '/task.json')
+    return bool(task and task['execution']['recovery_mode'] in leases.MODES)
+
+
+def check(store, task_id, run_id, *, snapshot=None):
+    from . import leases
+    snapshot = snapshot or store.snapshot()
     run = load_run(snapshot, task_id, run_id, live=True)[2]
     if run["execution"]["recovery_mode"] in leases.MODES:
         leases.guard(store, snapshot, dict(kind="run-check", task_id=task_id, run_id=run_id))
@@ -428,7 +457,10 @@ def record_workspace_preparation(store, task_id, run_id, run, state, state_path)
             'task_id': task_id, 'run_id': run_id, 'generation': run['generation'],
             'workspace_evidence_id': state['workspace_evidence_id']}
 
-    store.transact('prepare-evidence-' + digest(request), request, apply)
+    operation_id = 'prepare-evidence-' + digest(request)
+    if run.get('definition_commit'):
+        store.bind_new_operation(operation_id, run['definition_commit'])
+    store.transact(operation_id, request, apply)
     state['workspace_evidence_recorded'] = True
     atomic_json(state_path, state)
 
@@ -818,16 +850,19 @@ def heartbeat_state(run, previous=None, progress=None, *, initial=False):
 
 
 @heartbeat_reads()
-def heartbeat(store, task_id, run_id, *, progress=None, operation_id=None):
+def heartbeat(store, task_id, run_id, *, progress=None, operation_id=None, on_new_operation=None):
     from . import leases, task_io
     # Lease renewal uses the authority transaction, independently of the
     # detailed heartbeat ref. A fresh renewal gets a fresh operation identity.
     snapshot = store.snapshot()
     current = load_run(snapshot, task_id, run_id, live=True)[2]
+    if operation_id is None and on_new_operation is not None:
+        operation_id = store.new_id(snapshot.commit)
+        on_new_operation(operation_id)
     if current["execution"]["recovery_mode"] in leases.MODES:
         for attempt in range(8):
             try:
-                leases.renew(store, operation_id or uuid.uuid4().hex, task_id, run_id)
+                leases.renew(store, operation_id or store.new_id(snapshot.commit), task_id, run_id)
                 break
             except SupersededRenewal:
                 # A supervisor can issue a new renewal only after exact CAS

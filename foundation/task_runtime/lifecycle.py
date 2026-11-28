@@ -44,7 +44,8 @@ def execute(store, task_id, run_id, command, *, worker_finish=False):
             identity(record.get("launch_id"), "launch ID")
         else:
             record = {"run_id": run_id, "generation": run["generation"], "phase": "claiming",
-                      "launch_id": uuid.uuid4().hex, "executor": executor, "command_hash": command_hash,
+                      "launch_id": uuid.uuid4().hex,
+                      "executor": executor, "command_hash": command_hash,
                       "started_at": now()}
             atomic_json(marker, record)
         # The local marker alone cannot exclude a second clone. Consume one
@@ -57,11 +58,15 @@ def execute(store, task_id, run_id, command, *, worker_finish=False):
             current["execution_claim"] = {"launch_id": record["launch_id"], "claimed_at": now(),
                                           "generation": current["generation"]}
             return {runtime.run_path(task_id, run_id, snapshot) + "/run.json": encode(current)}, current["execution_claim"]
-        store.transact(digest(["run-execution", task_id, run_id])[:48],
+        operation_id = "execution-claim-" + record["launch_id"]
+        store.bind_new_operation(operation_id, run["definition_commit"])
+        store.transact(operation_id,
                        {"kind": "run-execution", "task_id": task_id, "run_id": run_id,
                         "launch_id": record["launch_id"]}, claim)
         heartbeat_id = record.get("starting_heartbeat_id", "execution-starting-" + record["launch_id"])
         for attempt in range(8):
+            if run["execution"]["recovery_mode"] in leases.MODES and run.get("definition_commit"):
+                store.bind_new_operation(heartbeat_id, run["definition_commit"])
             try:
                 runtime.heartbeat(store, task_id, run_id, progress="starting", operation_id=heartbeat_id)
                 break

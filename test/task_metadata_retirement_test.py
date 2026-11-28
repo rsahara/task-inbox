@@ -1,11 +1,51 @@
 """Completed executions leave task output, with retries reconciled via Git history."""
 from task_runtime_test import RuntimeCase
 from unittest.mock import patch
-from task_runtime import maintenance, runtime, task_io
+from task_runtime import git_support, layout, lifecycle, maintenance, runtime, task_io
 from task_runtime.store import CONTROL, GitFailure, Snapshot, Store, TaskError, encode
 
 
 class MetadataRetirementTest(RuntimeCase):
+    def test_new_run_and_start_receipt_skip_history_on_an_idle_task(self):
+        self.add()
+        tracking_tip = self.sb.fetch()
+        self.start(); self.prepare()
+        runtime.publish(self.sa, 'old-finish', 't', 'r', outcome='succeeded')
+        self.git(self.b, 'update-ref', 'refs/remotes/origin/main', tracking_tip)
+        self.assertNotEqual(tracking_tip, self.sb.fetch())
+        run_id = self.sb.new_id(prefix='worker-', operation_prefix='start-')
+        with patch.object(git_support, 'run_process', wraps=git_support.run_process) as commands, \
+                patch.object(lifecycle, 'reap', side_effect=AssertionError('no occupied slots')):
+            started = self.start(run_id, store=self.sb)
+        history = [call.args[0] for call in commands.call_args_list if 'log' in call.args[0]]
+        self.assertEqual(history, [])
+        self.assertNotIn(run_id, self.sb.issued_ids)
+        self.assertFalse(self.sb.issued_receipts)
+        self.assertEqual(started['generation'], 2)
+        with patch.object(layout, 'previous_locations', side_effect=AssertionError('live run')):
+            self.assertIsNone(runtime.run_metadata(self.sb.snapshot(), 't', run_id, 'cleanup.json'))
+        with patch.object(runtime, 'run_metadata', side_effect=AssertionError('active run has no cleanup')):
+            self.assertEqual(maintenance.maintain(self.sb, 't', run_id), [])
+
+    def test_new_ids_survive_authority_advances_and_reject_an_actual_retired_collision(self):
+        self.add()
+        issued = self.sa.fetch()
+        with patch('task_runtime.store.uuid.uuid4') as random_id:
+            random_id.return_value.hex = 'ab' * 16
+            run_id = self.sa.new_id(issued, 'worker-', operation_prefix='start-')
+            other = self.sb.new_id(issued, 'worker-', operation_prefix='start-')
+            self.assertEqual(other, run_id)
+            advanced = self.sa.commit(issued, {'unrelated.txt': b'change'}, 'Unrelated update')
+            self.sa.push(self.sa.ref, advanced, issued)
+            self.assertNotEqual(self.sa.new_id(advanced, 'worker-'), run_id)
+        with patch.object(layout, 'previous_locations', side_effect=AssertionError('no layout search')):
+            started = self.start(run_id)
+        self.prepare(run_id)
+        runtime.publish(self.sa, 'finish', 't', run_id, outcome='succeeded')
+        with self.assertRaisesRegex(TaskError, 'Run ID already exists'):
+            runtime.start(self.sb, 'different-operation', 't', 'another-runner', run_id=other)
+        self.assertEqual(self.start(other, store=self.sb), started)
+
     def test_finish_removes_execution_metadata_and_keeps_task_output(self):
         self.add(); self.start(); work = self.prepare()
         output = 'tasks/t/runs/r/artifacts/result.json'

@@ -3,6 +3,7 @@ import concurrent.futures
 import json
 import sys
 from pathlib import Path
+from unittest.mock import patch
 
 import task_runtime_test as fixtures
 from task_runtime import completion, layout, leases, lifecycle, maintenance, runtime, task_io
@@ -45,17 +46,6 @@ class DiscoveredLayoutTest(fixtures.RuntimeCase):
             with self.assertRaises(TaskError):
                 runtime.add_task(self.sa, 'bad-' + str(number), task_id='t', title='Task', path=location)
 
-    def move_task(self, destination, task_id='t'):
-        def move(snapshot):
-            source = runtime.root(task_id, snapshot)
-            changes = {}
-            for name in snapshot.entries:
-                if name.startswith(source + '/'):
-                    changes[destination + name[len(source):]] = snapshot.read(name)
-                    changes[name] = None
-            return changes, {}
-        self.sa.transact('move-' + task_id, {'kind': 'fixture-move', 'destination': destination}, move)
-
     def test_drained_move_preserves_retired_run_history_and_new_output_location(self):
         self.add()
         self.start('old')
@@ -66,7 +56,13 @@ class DiscoveredLayoutTest(fixtures.RuntimeCase):
         if path in self.sa.snapshot().entries:
             self.sa.transact('retire-old', {'kind': 'fixture-retire'}, lambda snapshot: ({path: None}, {}))
         self.move_task('tasks/t-readable')
-        self.assertEqual(runtime.load_run(self.sb.snapshot(), 't', 'old')[2], old)
+        snapshot = self.sb.snapshot()
+        self.assertEqual(layout.previous_locations(snapshot, 't', since=snapshot.commit), [])
+        with patch.object(layout, 'git', side_effect=TimeoutError), self.assertRaises(TimeoutError):
+            layout.previous_locations(snapshot, 't')
+        self.assertEqual(runtime.load_run(snapshot, 't', 'old')[2], old)
+        with patch.object(snapshot, 'json', side_effect=AssertionError('layout already read')):
+            self.assertEqual(layout.previous_locations(snapshot, 'unmoved'), [])
         with self.assertRaisesRegex(TaskError, 'Run ID already exists'):
             runtime.start(self.sa, 'reuse-old', 't', 'runner', run_id='old')
         new = self.start('new')

@@ -10,6 +10,7 @@ from pathlib import Path, PurePosixPath
 import re
 import tempfile
 import time
+import uuid
 
 from . import git_support
 
@@ -153,23 +154,27 @@ class Snapshot:
         data = self.read(path)
         return default if data is None else json.loads(data)
 
-    def metadata_snapshot(self, path):
+    def metadata_snapshot(self, path, *, since=None):
         """Read retired runtime metadata from the append-only authority history."""
-        if path in self.entries or self.json(CONTROL + '/config.json', {}).get('schema_version', 0) < 6 or not self.commit:
+        since = since or self.store.issued_receipts.get(path)
+        if (path in self.entries or not self.commit or self.commit == since
+                or self.json(CONTROL + '/config.json', {}).get('schema_version', 0) < 6):
             return self
         safe_path(path)
         self.store.require_history()
         if not hasattr(self, '_metadata_snapshots'):
             self._metadata_snapshots = {}
-        if path not in self._metadata_snapshots:
+        key = (path, since)
+        if key not in self._metadata_snapshots:
             # A merge's first parent can hold a stale running record. Read the
             # original retirement commit, including those on merged branches.
             changed = git(self.store.repo, 'log', '--full-history', '--no-merges',
-                          '--no-patch', '--diff-filter=D', '-1', '--format=%H', self.commit, '--', ':(literal)' + path)
+                          '--no-patch', '--diff-filter=D', '-1', '--format=%H',
+                          self.commit, *(['^' + since] if since else []), '--', ':(literal)' + path)
             parents = git(self.store.repo, 'rev-list', '--parents', '-n', '1', changed).split() if changed else []
             previous = Snapshot(self.store, parents[1]) if len(parents) > 1 else self
-            self._metadata_snapshots[path] = previous
-        return self._metadata_snapshots[path]
+            self._metadata_snapshots[key] = previous
+        return self._metadata_snapshots[key]
 
     def metadata(self, path, default=None):
         return self.metadata_snapshot(path).json(path, default)
@@ -194,6 +199,31 @@ class Store:
         self.transport = create(self.repo, remote, self.ref, transport_adapter)
         self.ref_prefix = "task-runtime"
         self._transport_checked = None
+        self.issued_ids = {}
+        self.issued_receipts = {}
+
+    def new_id(self, commit=None, prefix='', *, operation_prefix=''):
+        """Mint an ID after a fixed authority revision."""
+        if commit is None:
+            commit = self.remote_tip(self.ref)
+        salted = digest([commit, uuid.uuid4().hex])[:32]
+        value = identity(prefix + uuid.UUID(hex=salted, version=4).hex)
+        if commit:
+            self.remember_allocation(value, commit, operation_prefix=operation_prefix)
+        return value
+
+    def remember_allocation(self, value, commit, *, operation_prefix=None):
+        """Restore the issuance bound saved with an allocator-generated ID."""
+        if not isinstance(commit, str) or not re.fullmatch(r'(?:[0-9a-f]{40}|[0-9a-f]{64})', commit):
+            raise TaskError('Invalid allocation commit')
+        self.issued_ids[identity(value)] = commit
+        if operation_prefix is not None:
+            self.bind_new_operation(operation_prefix + value, commit)
+
+    def bind_new_operation(self, operation_id, commit):
+        """A receipt for an operation derived from a new ID cannot predate issuance."""
+        for key in (identity(operation_id), reservation_id(operation_id)):
+            self.issued_receipts[f'{CONTROL}/operations/{key}.json'] = commit
 
     @contextmanager
     def lock(self, path, timeout=10):
@@ -343,9 +373,19 @@ class Store:
         from .transport import TransportError
         identity(operation_id, "operation ID")
         receipt_path = f"{CONTROL}/operations/{operation_id}.json"
+        reservation_path = f"{CONTROL}/operations/{reservation_id(operation_id)}.json"
         journal = self.local / "operations" / (operation_id + ".json")
         retention_ref = "refs/task-runtime-pending/" + self.local.name + "/" + operation_id
         fingerprint = digest(request)
+        def confirmed_result(state, receipt):
+            state.update(done=True, receipt=receipt)
+            atomic_json(journal, state)
+            git(self.repo, "update-ref", "-d", retention_ref)
+            self.issued_ids.pop(operation_id, None)
+            self.issued_receipts.pop(receipt_path, None)
+            self.issued_receipts.pop(reservation_path, None)
+            return dict(receipt["result"], operation_id=operation_id, committed=True)
+
         with self.lock(journal.with_suffix(".lock")):
             state = json.loads(journal.read_text()) if journal.exists() else {"request_hash": fingerprint}
             if state["request_hash"] != fingerprint:
@@ -359,14 +399,11 @@ class Store:
                 if receipt:
                     if receipt["request_hash"] != fingerprint:
                         raise TaskError("Operation ID was already used for another request")
-                    state.update(done=True, receipt=receipt)
-                    atomic_json(journal, state)
-                    git(self.repo, "update-ref", "-d", retention_ref)
-                    return dict(receipt["result"], operation_id=operation_id, committed=True)
+                    return confirmed_result(state, receipt)
                 # Multi-ref operations reserve their public identity before
                 # writing a candidate elsewhere. Every authority mutation must
                 # honor that binding, including after receipt retirement/GC.
-                reservation = snapshot.metadata(CONTROL + '/operations/' + reservation_id(operation_id) + '.json')
+                reservation = snapshot.metadata(reservation_path)
                 if reservation:
                     bound = reservation.get('result', {})
                     if bound.get('reserved_operation') != operation_id or bound.get('request_hash') != fingerprint:
@@ -457,10 +494,7 @@ class Store:
                     remote = Snapshot(self, self.fetch())
                     found = remote.metadata(receipt_path)
                     if found and found["request_hash"] == fingerprint and self.contains(remote.commit, candidate):
-                        state.update(done=True, receipt=found)
-                        atomic_json(journal, state)
-                        git(self.repo, "update-ref", "-d", retention_ref)
-                        return dict(found["result"], operation_id=operation_id, committed=True)
+                        return confirmed_result(state, found)
                     if (attempt_ref and remote.commit != tip and self.contains(remote.commit, tip) and
                             not self.contains(remote.commit, candidate)):
                         raise SupersededRenewal("Frozen renewal was superseded; check ownership before using a new operation ID") from None
@@ -481,8 +515,5 @@ class Store:
                     continue
                 if not found or found["request_hash"] != fingerprint or not self.contains(confirmed.commit, candidate):
                     raise TaskError("Publication readback failed; retain operation " + operation_id)
-                state.update(done=True, receipt=found)
-                atomic_json(journal, state)
-                git(self.repo, "update-ref", "-d", retention_ref)
-                return dict(found["result"], operation_id=operation_id, committed=True)
+                return confirmed_result(state, found)
             raise TaskError("Concurrent updates exceeded retry limit; retry operation " + operation_id)

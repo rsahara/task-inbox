@@ -401,7 +401,8 @@ def maintain(store, task_id, run_id=None, limit=8):
         remote = store.list_refs([task_prefix, io_prefix])
         tracking = tracking_refs(store, task_prefix)
         tracking.update(tracking_refs(store, io_prefix))
-        prefix = runtime.root(task_id, snapshot) + "/runs/"
+        location = runtime.root(task_id, snapshot)
+        prefix = location + "/runs/"
         candidates = {path[len(prefix):].split('/')[0] for path in snapshot.entries
                       if path.startswith(prefix) and path.endswith('/cleanup.json') and
                       len(path[len(prefix):].split('/')) == 2}
@@ -412,6 +413,8 @@ def maintain(store, task_id, run_id=None, limit=8):
                     candidates.add(ref[len(namespace):].split('/')[0])
         if run_id is not None:
             candidates.add(run_id)
+        registry = snapshot.json(location + '/runtime.json', {})
+        candidates.difference_update(slot.get('run_id') for slot in registry.get('slots', {}).values())
         for current_id in sorted(candidates):
             if run_id is not None and current_id != run_id:
                 continue

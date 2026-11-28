@@ -6,10 +6,10 @@ import sys
 import unittest
 from unittest.mock import patch
 
-from task_runtime_test import ROOT, RuntimeCase, cli_json_lines
-from task_runtime import cli, completion, runtime
+from task_runtime_test import ROOT, RuntimeCase, cli_json_lines, unbounded_receipt_searches
+from task_runtime import cli, completion, git_support, runtime
 from task_runtime.store import GitFailure, TaskError
-from task_runtime.transport import TransportError
+from task_runtime.transport import DirectGit, TransportError
 
 
 class CliTest(RuntimeCase):
@@ -65,6 +65,80 @@ class CliTest(RuntimeCase):
         self.assertEqual(run['execution']['heartbeat_seconds'], 60)
         self.assertEqual(run['execution']['stale_seconds'], 300)
 
+    def test_generated_heartbeat_needs_no_extra_authority_ref_read(self):
+        self.add(); self.start()
+        authority = self.sa.ref
+        read_ref = DirectGit.read_ref
+        def read(transport, ref):
+            if ref == authority:
+                raise AssertionError('Heartbeat queried the authority ref to allocate an ID')
+            return read_ref(transport, ref)
+        with patch.object(DirectGit, 'read_ref', read):
+            beat, diagnostics = self.invoke('run', 'heartbeat', '--task', 't', '--run-id', 'r', operation=None)
+        operation_id = diagnostics[0]['operation_id']
+        self.assertEqual(beat['operation_id'], operation_id)
+        self.assertEqual(beat['sequence'], 1)
+        replay, _ = self.invoke('run', 'heartbeat', '--task', 't', '--run-id', 'r', operation=operation_id)
+        self.assertEqual(replay, beat)
+
+    def test_printed_start_id_survives_interruption_before_acceptance(self):
+        self.add()
+        arguments = ('run', 'start', '--task', 't', '--runner', 'worker')
+        with patch.object(runtime, 'start', side_effect=TaskError('Interrupted before acceptance')):
+            _, diagnostics = self.invoke(*arguments, operation=None, expected=1)
+        operation = diagnostics[0]['operation_id']
+        intent = self.sb.local / 'cli-admissions/run' / (operation + '.json')
+        self.assertEqual(json.loads(intent.read_text())['operation_id'], operation)
+        with patch.object(git_support, 'run_process', wraps=git_support.run_process) as commands:
+            admitted, _ = self.invoke(*arguments, operation=operation)
+        self.assertEqual(admitted['run_id'], operation)
+        self.assertEqual(unbounded_receipt_searches(commands, operation), [])
+        self.assertFalse(intent.exists())
+
+    def test_wake_retries_its_printed_id_without_scanning_retired_runs(self):
+        self.add('other'); self.start(task='other')
+        self.add()
+        arguments = ('io', 'wake', '--task', 't', '--runner', 'worker', '--force')
+        with patch.object(runtime, 'start', side_effect=TaskError('Interrupted before acceptance')):
+            _, diagnostics = self.invoke(*arguments, operation=None, expected=1)
+        operation = diagnostics[0]['operation_id']
+        with patch.object(git_support, 'run_process', wraps=git_support.run_process) as commands:
+            result, _ = self.invoke(*arguments, operation=operation)
+        self.assertEqual(result['run']['run_id'], operation)
+        unbounded = [call.args[0] for call in commands.call_args_list if '--full-history' in call.args[0]
+                     and not any(arg.startswith('^') for arg in call.args[0])]
+        self.assertEqual(unbounded, [])
+        self.assertFalse((self.sb.local / 'cli-admissions/io' / (operation + '.json')).exists())
+
+    def test_generated_stream_io_ids_use_the_existing_authority_read(self):
+        self.add(); self.start()
+        payload = self.base / 'payload.json'
+        payload.write_text('{}')
+        read_ref = DirectGit.read_ref
+        def read(transport, ref):
+            if ref == self.sa.ref:
+                raise AssertionError('Stream operation queried main to allocate an ID')
+            return read_ref(transport, ref)
+        with patch.object(DirectGit, 'read_ref', read):
+            sent, _ = self.invoke('io', 'send', '--task', 't', '--message-id', 'one', '--kind', 'work',
+                                  '--payload-file', str(payload), operation=None)
+            event, _ = self.invoke('io', 'emit', '--task', 't', '--run-id', 'r', '--event-id', 'one',
+                                   '--kind', 'work', '--payload-file', str(payload), operation=None)
+        self.assertTrue(sent['accepted'])
+        self.assertEqual(event['id'], 'one')
+
+    def test_busy_wake_retries_after_the_original_slot_is_released(self):
+        self.add(); self.start(); self.prepare()
+        arguments = ('io', 'wake', '--task', 't', '--runner', 'next', '--force')
+        busy, diagnostics = self.invoke(*arguments, operation=None)
+        self.assertEqual(busy['action'], 'busy')
+        operation = diagnostics[0]['operation_id']
+        runtime.publish(self.sa, 'finish-r', 't', 'r', outcome='succeeded')
+        with patch.object(git_support, 'run_process', wraps=git_support.run_process) as commands:
+            result, _ = self.invoke(*arguments, operation=operation)
+        self.assertEqual(result['run']['run_id'], operation)
+        self.assertEqual(unbounded_receipt_searches(commands, operation), [])
+
     def test_inbox_run_completion_and_cleanup_commands_work_across_clones(self):
         self.add()
         payload = self.base / 'payload.json'
@@ -94,6 +168,8 @@ class CliTest(RuntimeCase):
         self.invoke('run', 'finish', '--task', 't', '--run-id', 'r', '--outcome', 'succeeded', operation='cli-finish')
         self.assertEqual(self.sa.snapshot().read('tasks/t/data/report.txt'), b'result')
         self.assertFalse(work.exists())
+        with patch.object(cli.Store, 'new_id', side_effect=AssertionError('Dry run issued a remote operation')):
+            self.invoke('run', 'cleanup', '--task', 't', '--run-id', 'r', '--metadata-only', operation=None)
         self.invoke('run', 'cleanup', '--task', 't', '--run-id', 'r', '--apply',
                     '--confirm-stopped', operation='cli-cleanup')
 

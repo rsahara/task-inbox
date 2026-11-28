@@ -17,8 +17,18 @@ import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "foundation"))
-from task_runtime import cli, lifecycle, runtime, task_io
-from task_runtime.store import CONTROL, GitFailure, Snapshot, Store, TaskError, atomic_json, digest, encode
+from task_runtime import cli, git_support, lifecycle, runtime, task_io
+from task_runtime.store import CONTROL, GitFailure, Snapshot, Store, TaskError, atomic_json, digest, encode, reservation_id
+
+
+def unbounded_receipt_searches(commands, operation_id):
+    paths = {f":(literal){CONTROL}/operations/{key}.json" for key in (operation_id, reservation_id(operation_id))}
+    matches = []
+    for call in commands.call_args_list:
+        argv = call.args[0]
+        if 'log' in argv and argv[-1] in paths and not any(arg.startswith('^') for arg in argv):
+            matches.append(argv)
+    return matches
 
 
 def cli_json_lines(value):
@@ -73,6 +83,17 @@ class RuntimeCase(unittest.TestCase):
 
     def add(self, task="t", **kwargs):
         return runtime.add_task(self.sa, "add-" + task, title="Task " + task, task_id=task, body="Instructions", **kwargs)
+
+    def move_task(self, destination, task_id='t'):
+        def move(snapshot):
+            source = runtime.root(task_id, snapshot)
+            changes = {}
+            for name in snapshot.entries:
+                if name.startswith(source + '/'):
+                    changes[destination + name[len(source):]] = snapshot.read(name)
+                    changes[name] = None
+            return changes, {}
+        self.sa.transact('move-' + task_id, {'kind': 'fixture-move', 'destination': destination}, move)
 
     def start(self, run="r", task="t", store=None, **kwargs):
         return runtime.start(store or self.sa, "start-" + run, task, "runner-" + run, run_id=run, machine_id="fixture", **kwargs)
@@ -888,9 +909,10 @@ class TaskRuntimeTest(RuntimeCase):
 
     def test_lost_execution_claim_reply_does_not_allow_another_clone_to_launch(self):
         self.add()
-        self.start()
-        self.prepare()
-        runtime.prepare(self.sb, "t", "r", self.base / "other-work")
+        run_id = self.sa.new_id(self.sa.fetch(), operation_prefix='start-')
+        self.start(run=run_id)
+        self.prepare(run=run_id)
+        runtime.prepare(self.sb, "t", run_id, self.base / "other-work")
         launched = self.base / "launches"
         command = [sys.executable, "-c",
                    "from pathlib import Path; import sys\n"
@@ -900,10 +922,16 @@ class TaskRuntimeTest(RuntimeCase):
             original(ref, candidate, expected)
             if ref == self.sa.ref:
                 raise GitFailure("lost response", {"definite_rejection": False})
-        with patch.object(self.sa, "push", side_effect=lose_reply):
-            self.assertEqual(lifecycle.execute(self.sa, "t", "r", command)["exit_code"], 0)
+        with patch.object(self.sa, "push", side_effect=lose_reply), \
+                patch.object(git_support, "run_process", wraps=git_support.run_process) as commands:
+            executed = lifecycle.execute(self.sa, "t", run_id, command)
+        self.assertEqual(executed["exit_code"], 0)
+        operation = "execution-claim-" + executed["launch_id"]
+        receipt = self.sa.snapshot().metadata(f'{CONTROL}/operations/{operation}.json')
+        self.assertEqual(receipt['result']['launch_id'], executed['launch_id'])
+        self.assertEqual(unbounded_receipt_searches(commands, operation), [])
         with self.assertRaises(TaskError):
-            lifecycle.execute(self.sb, "t", "r", command)
+            lifecycle.execute(self.sb, "t", run_id, command)
         self.assertEqual(launched.read_text(), "launch\n")
 
     def test_original_workspace_recovers_execution_claim_after_lost_readback(self):
