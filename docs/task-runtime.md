@@ -252,8 +252,8 @@ fails during claim or starting heartbeat, the original executor can repeat
 `exec` with the same command, Git directory and execution lock while the receipt
 is in `claiming`. Copying a receipt to a different clone cannot transfer this
 authorization. The retry reuses the same launch ID and authority transaction.
-Writers derive the claim operation ID from the task and run. A run with a
-recorded allocation commit bounds the claim receipt lookup to its lifetime.
+The saved launch ID determines the claim operation. Its receipt lookup starts
+at the run's definition commit.
 The heartbeat CLI uses its run check's authority revision to issue an ID and
 prints the ID before publishing the heartbeat.
 An uncertain starting heartbeat keeps its operation ID. If a generation-timeout

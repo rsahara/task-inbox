@@ -35,7 +35,7 @@ caller-provided snapshot or reads the authority ref at issuance. The issuing
 process checks current records and can bound receipt lookup to changes since
 that revision. An unchanged task definition and slot registry rule out an
 intervening admission. An intent that saves the allocation commit with its ID
-can restore this bound on retry. Caller-supplied IDs and older intents retain
+can restore this bound on retry. Caller-supplied IDs without an allocation bound retain
 historical replay and collision checks, including after a task moves or a run is retired.
 For automatically generated `run start`, `io wake` and `execute` IDs, the CLI saves the
 allocation commit in the clone before printing the ID. A retry in that clone

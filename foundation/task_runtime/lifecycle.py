@@ -58,9 +58,8 @@ def execute(store, task_id, run_id, command, *, worker_finish=False):
             current["execution_claim"] = {"launch_id": record["launch_id"], "claimed_at": now(),
                                           "generation": current["generation"]}
             return {runtime.run_path(task_id, run_id, snapshot) + "/run.json": encode(current)}, current["execution_claim"]
-        operation_id = digest(["run-execution", task_id, run_id])[:48]
-        if run.get("allocation_commit"):
-            store.bind_new_operation(operation_id, run["allocation_commit"])
+        operation_id = "execution-claim-" + record["launch_id"]
+        store.bind_new_operation(operation_id, run["definition_commit"])
         store.transact(operation_id,
                        {"kind": "run-execution", "task_id": task_id, "run_id": run_id,
                         "launch_id": record["launch_id"]}, claim)

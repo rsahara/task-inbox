@@ -129,10 +129,10 @@ def operation(execution_id, phase, index=None):
     return 'execute-' + digest([execution_id, phase, index])[:48]
 
 
-def select(store, execution_id, index, task_ids, *, condition_adapter, force, used, snapshot=None):
+def select(store, execution_id, index, task_ids, *, condition_adapter, force, used):
     request = dict(kind='execution-select', execution_id=execution_id, index=index)
     selection_id = operation(execution_id, 'select', index)
-    snapshot = snapshot or store.snapshot()
+    snapshot = store.snapshot()
     # Match normal run-start's configured lease recovery before a new selection.
     # Historical/ambiguous selection replays must not revoke a replacement run.
     if not (store.local / 'operations' / (selection_id + '.json')).exists():
@@ -145,12 +145,8 @@ def select(store, execution_id, index, task_ids, *, condition_adapter, force, us
         decision = plan(store, task_ids, condition_adapter=condition_adapter,
                         force=force, snapshot=snapshot, used=used)
         target = next((d for d in decision['decisions'] if d['ready']), None)
-        run_id = (store.new_id(snapshot.commit, 'execute-', operation_prefix=None) if target
-                  else 'execute-' + digest([execution_id, index])[:40])
-        choice = dict(plan=decision, task_id=target['task_id'] if target else None, run_id=run_id)
-        if target:
-            choice.update(start_operation='start-' + run_id, finish_operation='finish-' + run_id)
-        return {}, choice
+        run_id = store.new_id(snapshot.commit, 'execute-', operation_prefix=None) if target else None
+        return {}, dict(plan=decision, task_id=target['task_id'] if target else None, run_id=run_id)
 
     return store.transact(selection_id, request, apply)
 
@@ -166,46 +162,6 @@ def worker_result(path, run):
             or not isinstance(value.get('summary'), str)):
         raise TaskError('Executor result must bind a terminal outcome to this run generation')
     return value
-
-
-def admit_selection(store, choice, execution_id, index, runner, check, contract, observed):
-    task_id, run_id = choice['task_id'], choice['run_id']
-    legacy_start = operation(execution_id, 'start', index)
-    legacy_finish = operation(execution_id, 'finish', index)
-
-    def admit(key):
-        return runtime.start(store, key, task_id, runner, run_id=run_id,
-                             admission_check=check, admission_key=operation(execution_id, 'select', index),
-                             completion_contract=contract)
-
-    if 'start_operation' not in choice:
-        return admit(legacy_start), legacy_finish
-    issued_at = choice['plan']['commit']
-    store.remember_allocation(run_id, issued_at)
-    for key in (choice['start_operation'], choice['finish_operation']):
-        store.bind_new_operation(key, issued_at)
-
-    def admitted_by_older_writer(snapshot):
-        new_receipt = f"{CONTROL}/operations/{choice['start_operation']}.json"
-        if snapshot.commit == issued_at or new_receipt in snapshot.entries:
-            return False
-        # Retirement removes the scoped start receipt and run record together.
-        previous, path = runtime.run_metadata_snapshot(snapshot, task_id, run_id, 'run.json')
-        if path not in previous.entries or new_receipt in previous.entries:
-            return False
-        receipt = previous.json(f'{CONTROL}/operations/{legacy_start}.json')
-        return receipt is not None and receipt['result'].get('run_id') == run_id
-
-    if not admitted_by_older_writer(observed):
-        try:
-            return admit(choice['start_operation']), choice['finish_operation']
-        except TaskError:
-            # An older writer may have won admission since selection was read.
-            latest = store.snapshot()
-            if latest.commit == observed.commit or not admitted_by_older_writer(latest):
-                raise
-    store.bind_new_operation(legacy_start, issued_at)
-    return admit(legacy_start), legacy_finish
 
 
 def execute(store, execution_id, task_ids, runner, executor, *, condition_adapter=None,
@@ -236,13 +192,17 @@ def execute(store, execution_id, task_ids, runner, executor, *, condition_adapte
     with store.lock(store.local / ('execute-' + digest(execution_id) + '.lock')):
         for index in range(limit):
             signals.sync(store)
-            observed = store.snapshot()
             choice = select(store, execution_id, index, task_ids, condition_adapter=checker,
-                            force=force and index == 0, used=used, snapshot=observed)
+                            force=force and index == 0, used=used)
             task_id, run_id = choice['task_id'], choice['run_id']
             if task_id is None:
                 reason = 'no_ready_task'
                 break
+            issued_at = choice['plan']['commit']
+            start_id, finish_id = 'start-' + run_id, 'finish-' + run_id
+            store.remember_allocation(run_id, issued_at, operation_prefix='start-')
+            store.bind_new_operation(finish_id, issued_at)
+
             def recheck(snapshot):
                 decision = plan(store, [task_id], condition_adapter=checker,
                                 force=force and index == 0 and task_id == task_ids[0],
@@ -251,8 +211,9 @@ def execute(store, execution_id, task_ids, runner, executor, *, condition_adapte
                     raise TaskError('Execution admission changed: ' + decision['reason'])
 
             try:
-                admitted, finish_id = admit_selection(store, choice, execution_id, index, runner,
-                                                      recheck, contracts.get(task_id), observed)
+                admitted = runtime.start(store, start_id, task_id, runner, run_id=run_id,
+                                         admission_check=recheck, admission_key=operation(execution_id, 'select', index),
+                                         completion_contract=contracts.get(task_id))
             except TaskError as error:
                 if str(error).startswith('Execution admission changed: '):
                     reason = str(error).split(': ', 1)[1]

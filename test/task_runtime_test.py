@@ -915,7 +915,7 @@ class TaskRuntimeTest(RuntimeCase):
                 patch.object(git_support, "run_process", wraps=git_support.run_process) as commands:
             executed = lifecycle.execute(self.sa, "t", run_id, command)
         self.assertEqual(executed["exit_code"], 0)
-        operation = digest(["run-execution", "t", run_id])[:48]
+        operation = "execution-claim-" + executed["launch_id"]
         receipt = self.sa.snapshot().metadata(f'{CONTROL}/operations/{operation}.json')
         self.assertEqual(receipt['result']['launch_id'], executed['launch_id'])
         self.assertEqual(unbounded_receipt_searches(commands, operation), [])
