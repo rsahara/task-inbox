@@ -421,13 +421,17 @@ def has_reapable_slots(snapshot, task_id):
     return bool(task and task['execution']['recovery_mode'] in leases.MODES)
 
 
-def check(store, task_id, run_id):
+def checked_run_snapshot(store, task_id, run_id):
     from . import leases
     snapshot = store.snapshot()
     run = load_run(snapshot, task_id, run_id, live=True)[2]
     if run["execution"]["recovery_mode"] in leases.MODES:
         leases.guard(store, snapshot, dict(kind="run-check", task_id=task_id, run_id=run_id))
-    return run
+    return snapshot, run
+
+
+def check(store, task_id, run_id):
+    return checked_run_snapshot(store, task_id, run_id)[1]
 
 
 def local_state(store, task_id, run_id):
@@ -853,12 +857,15 @@ def heartbeat_state(run, previous=None, progress=None, *, initial=False):
 
 
 @heartbeat_reads()
-def heartbeat(store, task_id, run_id, *, progress=None, operation_id=None):
+def heartbeat(store, task_id, run_id, *, progress=None, operation_id=None, on_new_operation=None):
     from . import leases, task_io
     # Lease renewal uses the authority transaction, independently of the
     # detailed heartbeat ref. A fresh renewal gets a fresh operation identity.
     snapshot = store.snapshot()
     current = load_run(snapshot, task_id, run_id, live=True)[2]
+    if operation_id is None and on_new_operation is not None:
+        operation_id = store.new_id(snapshot.commit)
+        on_new_operation(operation_id)
     if current["execution"]["recovery_mode"] in leases.MODES:
         for attempt in range(8):
             try:

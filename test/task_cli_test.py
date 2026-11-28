@@ -9,7 +9,7 @@ from unittest.mock import patch
 from task_runtime_test import ROOT, RuntimeCase, cli_json_lines
 from task_runtime import cli, completion, runtime
 from task_runtime.store import GitFailure, TaskError
-from task_runtime.transport import TransportError
+from task_runtime.transport import DirectGit, TransportError
 
 
 class CliTest(RuntimeCase):
@@ -65,6 +65,22 @@ class CliTest(RuntimeCase):
         self.assertEqual(run['execution']['heartbeat_seconds'], 60)
         self.assertEqual(run['execution']['stale_seconds'], 300)
 
+    def test_generated_heartbeat_needs_no_extra_authority_ref_read(self):
+        self.add(); self.start()
+        authority = self.sa.ref
+        read_ref = DirectGit.read_ref
+        def read(transport, ref):
+            if ref == authority:
+                raise AssertionError('Heartbeat queried the authority ref to allocate an ID')
+            return read_ref(transport, ref)
+        with patch.object(DirectGit, 'read_ref', read):
+            beat, diagnostics = self.invoke('run', 'heartbeat', '--task', 't', '--run-id', 'r', operation=None)
+        operation_id = diagnostics[0]['operation_id']
+        self.assertEqual(beat['operation_id'], operation_id)
+        self.assertEqual(beat['sequence'], 1)
+        replay, _ = self.invoke('run', 'heartbeat', '--task', 't', '--run-id', 'r', operation=operation_id)
+        self.assertEqual(replay, beat)
+
     def test_inbox_run_completion_and_cleanup_commands_work_across_clones(self):
         self.add()
         payload = self.base / 'payload.json'
@@ -94,6 +110,8 @@ class CliTest(RuntimeCase):
         self.invoke('run', 'finish', '--task', 't', '--run-id', 'r', '--outcome', 'succeeded', operation='cli-finish')
         self.assertEqual(self.sa.snapshot().read('tasks/t/data/report.txt'), b'result')
         self.assertFalse(work.exists())
+        with patch.object(cli.Store, 'new_id', side_effect=AssertionError('Dry run issued a remote operation')):
+            self.invoke('run', 'cleanup', '--task', 't', '--run-id', 'r', '--metadata-only', operation=None)
         self.invoke('run', 'cleanup', '--task', 't', '--run-id', 'r', '--apply',
                     '--confirm-stopped', operation='cli-cleanup')
 

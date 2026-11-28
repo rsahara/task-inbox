@@ -162,6 +162,10 @@ def parser():
     return p
 
 
+def report_operation(operation_id):
+    print(json.dumps({"operation_id": operation_id}), file=sys.stderr, flush=True)
+
+
 def dispatch(args):
     store = Store(args.repo, args.remote, args.branch, transport_adapter=args.transport_adapter)
     if args.command == "transport-check":
@@ -169,15 +173,19 @@ def dispatch(args):
     operation = identity(args.operation_id, "operation ID") if args.operation_id else None
     if args.command == 'execute' and args.check:
         return execution.plan(store, args.task, condition_adapter=args.condition_adapter, force=args.force)
+    if args.command == 'run' and args.action == 'heartbeat' and operation is None:
+        return runtime.heartbeat(store, args.task, args.run_id, progress=args.progress,
+                                 on_new_operation=report_operation)
     # Always expose a generated request identity before a remote mutation, so
     # an interrupted CLI can be retried without guessing another request ID.
     mutation = args.command in ("init", "execute") or args.action in ("add", "edit", "start", "publish", "finish", "recover", "cleanup", "activate", "recovery-policy", "renew", "checkpoint", "deliver-checkpoint", "heartbeat", "completion", 'send', 'complete', 'wake', 'emit', 'enable', 'subscribe', 'put', 'sync', 'migrate')
     if mutation:
         if operation is None:
-            # Signal put and sync use their own content-derived operation keys.
-            operation = (uuid.uuid4().hex if args.command == 'signal' and args.action in ('put', 'sync')
-                         else store.new_id())
-        print(json.dumps({"operation_id": operation}), file=sys.stderr, flush=True)
+            local_only = ((args.command == 'signal' and args.action in ('put', 'sync'))
+                          or (args.command == 'run' and args.action == 'cleanup'
+                              and (not args.apply or args.metadata_only)))
+            operation = uuid.uuid4().hex if local_only else store.new_id()
+        report_operation(operation)
     if args.command == 'execute':
         return execution.execute(store, operation, args.task, args.runner, args.executor,
                                  condition_adapter=args.condition_adapter, force=args.force,

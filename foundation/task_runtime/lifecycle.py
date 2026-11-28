@@ -25,7 +25,7 @@ def execute(store, task_id, run_id, command, *, worker_finish=False):
     marker = state_path.with_suffix(".execution.json")
     lock = state_path.with_suffix(".execution.lock")
     with store.lock(lock):
-        run = runtime.check(store, task_id, run_id)
+        snapshot, run = runtime.checked_run_snapshot(store, task_id, run_id)
         if run.get("continuation"):
             raise TaskError("A checkpoint continuation is delivery-only; do not execute its old computation")
         if not state_path.exists():
@@ -45,7 +45,7 @@ def execute(store, task_id, run_id, command, *, worker_finish=False):
             if "claim_operation" in record:
                 store.bind_new_operation(record["claim_operation"], run["definition_commit"])
         else:
-            claim_operation = store.new_id(prefix="execution-claim-")
+            claim_operation = store.new_id(snapshot.commit, prefix="execution-claim-")
             record = {"run_id": run_id, "generation": run["generation"], "phase": "claiming",
                       "launch_id": claim_operation.removeprefix("execution-claim-"), "claim_operation": claim_operation,
                       "executor": executor, "command_hash": command_hash,
