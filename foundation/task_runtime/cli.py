@@ -166,19 +166,22 @@ def dispatch(args):
     store = Store(args.repo, args.remote, args.branch, transport_adapter=args.transport_adapter)
     if args.command == "transport-check":
         return store.preflight()
-    operation = identity(args.operation_id or uuid.uuid4().hex, "operation ID")
+    operation = identity(args.operation_id, "operation ID") if args.operation_id else None
+    if args.command == 'execute' and args.check:
+        return execution.plan(store, args.task, condition_adapter=args.condition_adapter, force=args.force)
+    # Always expose a generated request identity before a remote mutation, so
+    # an interrupted CLI can be retried without guessing another request ID.
+    mutation = args.command in ("init", "execute") or args.action in ("add", "edit", "start", "publish", "finish", "recover", "cleanup", "activate", "recovery-policy", "renew", "checkpoint", "deliver-checkpoint", "heartbeat", "completion", 'send', 'complete', 'wake', 'emit', 'enable', 'subscribe', 'put', 'sync', 'migrate')
+    if mutation:
+        if operation is None:
+            # Signal put and sync use their own content-derived operation keys.
+            operation = (uuid.uuid4().hex if args.command == 'signal' and args.action in ('put', 'sync')
+                         else store.new_id())
+        print(json.dumps({"operation_id": operation}), file=sys.stderr, flush=True)
     if args.command == 'execute':
-        if args.check:
-            return execution.plan(store, args.task, condition_adapter=args.condition_adapter, force=args.force)
-        print(json.dumps({'operation_id': operation}), file=sys.stderr, flush=True)
         return execution.execute(store, operation, args.task, args.runner, args.executor,
                                  condition_adapter=args.condition_adapter, force=args.force,
                                  completion_contracts=json.loads(Path(args.completion_contracts_file).read_text()) if args.completion_contracts_file else None)
-    # Always expose a generated request identity before a remote mutation, so
-    # an interrupted CLI can be retried without guessing another request ID.
-    mutation = args.command == "init" or args.action in ("add", "edit", "start", "publish", "finish", "recover", "cleanup", "activate", "recovery-policy", "renew", "checkpoint", "deliver-checkpoint", "heartbeat", "completion", 'send', 'complete', 'wake', 'emit', 'enable', 'subscribe', 'put', 'sync', 'migrate')
-    if mutation:
-        print(json.dumps({"operation_id": operation}), file=sys.stderr, flush=True)
     if args.command == "init":
         return runtime.initialize(store, operation, index=args.index, task_root=args.task_root)
     if args.command == 'signal':

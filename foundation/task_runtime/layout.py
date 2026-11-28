@@ -69,11 +69,11 @@ def task_path(task_id, snapshot):
 
 def previous_locations(snapshot, task_id):
     """Bind former locations to their owner at each deletion's parent tree."""
-    if not snapshot.commit or snapshot.json(CONTROL + '/config.json', {}).get('schema_version', 0) < 6:
-        return []
-    snapshot.store.require_history()
-    if not hasattr(snapshot, '_previous_task_locations'):
-        snapshot._previous_task_locations = {}
+    if hasattr(snapshot, '_previous_task_locations'):
+        return snapshot._previous_task_locations.get(task_id, [])
+    locations = {}
+    if snapshot.commit and snapshot.json(CONTROL + '/config.json', {}).get('schema_version', 0) >= 6:
+        snapshot.store.require_history()
         pattern = ':(glob)tasks/*/task.json'
         commits = git(snapshot.store.repo, 'log', '-m', '--full-history', '--no-renames',
                       '--format=%H', '--diff-filter=D', snapshot.commit, '--', pattern).splitlines()
@@ -92,9 +92,10 @@ def previous_locations(snapshot, task_id):
                     name = raw.decode()
                     record = previous.json(name)
                     if record and isinstance(record.get('id'), str):
-                        snapshot._previous_task_locations.setdefault(record['id'], []).append(
+                        locations.setdefault(record['id'], []).append(
                             (name.rsplit('/', 1)[0], previous))
-    return snapshot._previous_task_locations.get(task_id, [])
+    snapshot._previous_task_locations = locations
+    return locations.get(task_id, [])
 
 
 def register(snapshot, task_id, requested=None):

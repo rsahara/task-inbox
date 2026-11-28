@@ -50,7 +50,27 @@ def run_metadata_snapshot(snapshot, task_id, run_id, name):
     safe_path(name)
     if '/' in name:
         raise TaskError('Run metadata must be a file name')
-    current = run_path(task_id, run_id, snapshot) + '/' + name
+    location = root(task_id, snapshot)
+    prefix = location + '/runs/' + identity(run_id, 'run ID') + '/'
+    current = prefix + name
+    if name != 'run.json' and current not in snapshot.entries:
+        owner = snapshot.json(prefix + 'run.json', {})
+        if owner.get('status') == 'running' and owner.get('task_id') == task_id and owner.get('run_id') == run_id:
+            return snapshot, current
+    issued = snapshot.store.issued_ids.get(run_id)
+    if issued and current not in snapshot.entries and name == 'run.json':
+        registry = location + '/runtime.json'
+        # Every admission increments a slot generation, even if the run and its
+        # receipts have since been retired. Other tasks may advance authority.
+        if issued == snapshot.commit or (registry in snapshot.entries and
+                git(snapshot.store.repo, 'diff', '--quiet', issued, snapshot.commit,
+                    '--', ':(literal)' + registry, ':(literal)' + location + '/task.json', predicate=True)):
+            return snapshot, current
+        # A competing admission or move warrants a check only within this ID's lifetime.
+        if not git(snapshot.store.repo, 'log', '-m', '--full-history', '--no-renames',
+                   '-1', '--format=%H', snapshot.commit, '^' + issued, '--',
+                   ':(glob)**/runs/' + run_id + '/run.json'):
+            return snapshot, current
     def locate(tree, location):
         prefix = location + '/runs/' + identity(run_id, 'run ID')
         candidate = prefix + '/' + name
@@ -64,7 +84,7 @@ def run_metadata_snapshot(snapshot, task_id, run_id, name):
             if owner and owner.get('task_id') == task_id and owner.get('run_id') == run_id:
                 return located, candidate
         return None
-    found = locate(snapshot, root(task_id, snapshot))
+    found = locate(snapshot, location)
     if found is not None:
         return found
     from . import layout
@@ -317,10 +337,9 @@ def start(store, operation_id, task_id, runner_id, *, run_id=None, machine_id=No
     # remote state alone. A replay only reads its historical receipt: it must
     # never mutate another generation while reconciling an old start.
     initial = store.snapshot()
-    initial_task = initial.json(root(task_id, initial) + "/task.json")
-    if (not initial.metadata(CONTROL + "/operations/" + identity(operation_id) + ".json") and
-            initial_task and initial_task["execution"]["recovery_mode"] in leases.MODES and
-            not (store.local / "operations" / (operation_id + ".json")).exists()):
+    if (has_reapable_slots(initial, task_id) and
+            not (store.local / "operations" / (identity(operation_id) + ".json")).exists() and
+            not initial.metadata(CONTROL + "/operations/" + operation_id + ".json")):
         from . import lifecycle
         lifecycle.reap(store, task_id, apply=True, observer_profile="stateless")
     def apply(snapshot):
@@ -386,7 +405,19 @@ def start(store, operation_id, task_id, runner_id, *, run_id=None, machine_id=No
         changes.update({root(task_id, snapshot) + "/runtime.json": encode(runtime),
                         run_path(task_id, run_id, snapshot) + "/run.json": encode(run)})
         return changes, run
-    return store.transact(operation_id, request, apply)
+    admitted = store.transact(operation_id, request, apply)
+    store.issued_ids.pop(run_id, None)
+    return admitted
+
+
+def has_reapable_slots(snapshot, task_id):
+    from . import leases
+    location = root(task_id, snapshot)
+    active = snapshot.json(location + '/runtime.json', {}).get('slots', {})
+    if not any(slot.get('run_id') for slot in active.values()):
+        return False
+    task = snapshot.json(location + '/task.json')
+    return bool(task and task['execution']['recovery_mode'] in leases.MODES)
 
 
 def check(store, task_id, run_id):
@@ -428,7 +459,10 @@ def record_workspace_preparation(store, task_id, run_id, run, state, state_path)
             'task_id': task_id, 'run_id': run_id, 'generation': run['generation'],
             'workspace_evidence_id': state['workspace_evidence_id']}
 
-    store.transact('prepare-evidence-' + digest(request), request, apply)
+    operation_id = 'prepare-evidence-' + digest(request)
+    if run.get('definition_commit'):
+        store.bind_new_operation(operation_id, run['definition_commit'])
+    store.transact(operation_id, request, apply)
     state['workspace_evidence_recorded'] = True
     atomic_json(state_path, state)
 

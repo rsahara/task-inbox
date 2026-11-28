@@ -5,7 +5,7 @@ import os
 from pathlib import Path
 import subprocess
 
-from . import completion, interfaces, layout, leases, lifecycle, maintenance, runtime, signals, task_io
+from . import completion, interfaces, layout, lifecycle, maintenance, runtime, signals, task_io
 from .store import CONTROL, TaskError, atomic_json, digest, encode, git_support, identity
 
 PROTOCOL = 'task-inbox-execution/v1'
@@ -135,19 +135,19 @@ def select(store, execution_id, index, task_ids, *, condition_adapter, force, us
     snapshot = store.snapshot()
     # Match normal run-start's configured lease recovery before a new selection.
     # Historical/ambiguous selection replays must not revoke a replacement run.
-    if (not snapshot.metadata(CONTROL + '/operations/' + selection_id + '.json')
-            and not (store.local / 'operations' / (selection_id + '.json')).exists()):
-        for task_id in task_ids:
-            task = runtime.load_task(snapshot, task_id)[0]
-            if task['execution']['recovery_mode'] in leases.MODES:
+    if not (store.local / 'operations' / (selection_id + '.json')).exists():
+        active = [task_id for task_id in task_ids if runtime.has_reapable_slots(snapshot, task_id)]
+        if active and not snapshot.metadata(CONTROL + '/operations/' + selection_id + '.json'):
+            for task_id in active:
                 lifecycle.reap(store, task_id, apply=True, observer_profile='stateless')
 
     def apply(snapshot):
         decision = plan(store, task_ids, condition_adapter=condition_adapter,
                         force=force, snapshot=snapshot, used=used)
         target = next((d for d in decision['decisions'] if d['ready']), None)
-        return {}, dict(plan=decision, task_id=target['task_id'] if target else None,
-                        run_id='execute-' + digest([execution_id, index])[:40])
+        run_id = (store.new_id(snapshot.commit, 'execute-', operation_prefix=None) if target
+                  else 'execute-' + digest([execution_id, index])[:40])
+        return {}, dict(plan=decision, task_id=target['task_id'] if target else None, run_id=run_id)
 
     return store.transact(selection_id, request, apply)
 
@@ -184,6 +184,9 @@ def execute(store, execution_id, task_ids, runner, executor, *, condition_adapte
                    condition_sha256=hashlib.sha256(Path(checker).read_bytes()).hexdigest() if checker else None)
     # The shared operation receipt is the caller intent. No separate application
     # lock, mutable routing queue or host-specific launch state is needed.
+    if execution_id in store.issued_ids:
+        for phase, index in (('begin', None), ('select', 0), ('start', 0), ('finish', 0)):
+            store.bind_new_operation(operation(execution_id, phase, index), store.issued_ids[execution_id])
     store.transact(operation(execution_id, 'begin'), request, lambda snapshot: ({}, {'execution_id': execution_id}))
     steps, used = [], []
     reason, attention = 'limit_reached', False
@@ -196,7 +199,7 @@ def execute(store, execution_id, task_ids, runner, executor, *, condition_adapte
             if task_id is None:
                 reason = 'no_ready_task'
                 break
-            current = runtime.run_record(store.snapshot(), task_id, run_id)
+            current = None if run_id in store.issued_ids else runtime.run_record(store.snapshot(), task_id, run_id)
             if current is None:
                 def recheck(snapshot):
                     decision = plan(store, [task_id], condition_adapter=checker,
@@ -206,10 +209,10 @@ def execute(store, execution_id, task_ids, runner, executor, *, condition_adapte
                         raise TaskError('Execution admission changed: ' + decision['reason'])
 
                 try:
-                    current = runtime.start(store, operation(execution_id, 'start', index), task_id, runner,
-                                            run_id=run_id, admission_check=recheck,
-                                            admission_key=operation(execution_id, 'select', index),
-                                            completion_contract=contracts.get(task_id))
+                    runtime.start(store, operation(execution_id, 'start', index), task_id, runner,
+                                  run_id=run_id, admission_check=recheck,
+                                  admission_key=operation(execution_id, 'select', index),
+                                  completion_contract=contracts.get(task_id))
                 except TaskError as error:
                     if str(error).startswith('Execution admission changed: '):
                         reason = str(error).split(': ', 1)[1]
@@ -218,6 +221,7 @@ def execute(store, execution_id, task_ids, runner, executor, *, condition_adapte
                         raise
                     reason = 'busy'
                     break
+                current = runtime.load_run(store.snapshot(), task_id, run_id)[2]
             if current['status'] != 'running':
                 if current['status'] in ('succeeded', 'failed', 'cancelled'):
                     signals.require_delivery(signals.sync(store, task_id=task_id))

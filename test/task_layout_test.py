@@ -3,6 +3,7 @@ import concurrent.futures
 import json
 import sys
 from pathlib import Path
+from unittest.mock import patch
 
 import task_runtime_test as fixtures
 from task_runtime import completion, layout, leases, lifecycle, maintenance, runtime, task_io
@@ -66,7 +67,12 @@ class DiscoveredLayoutTest(fixtures.RuntimeCase):
         if path in self.sa.snapshot().entries:
             self.sa.transact('retire-old', {'kind': 'fixture-retire'}, lambda snapshot: ({path: None}, {}))
         self.move_task('tasks/t-readable')
-        self.assertEqual(runtime.load_run(self.sb.snapshot(), 't', 'old')[2], old)
+        snapshot = self.sb.snapshot()
+        with patch.object(layout, 'git', side_effect=TimeoutError), self.assertRaises(TimeoutError):
+            layout.previous_locations(snapshot, 't')
+        self.assertEqual(runtime.load_run(snapshot, 't', 'old')[2], old)
+        with patch.object(snapshot, 'json', side_effect=AssertionError('layout already read')):
+            self.assertEqual(layout.previous_locations(snapshot, 'unmoved'), [])
         with self.assertRaisesRegex(TaskError, 'Run ID already exists'):
             runtime.start(self.sa, 'reuse-old', 't', 'runner', run_id='old')
         new = self.start('new')

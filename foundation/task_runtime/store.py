@@ -10,6 +10,7 @@ from pathlib import Path, PurePosixPath
 import re
 import tempfile
 import time
+import uuid
 
 from . import git_support
 
@@ -155,7 +156,9 @@ class Snapshot:
 
     def metadata_snapshot(self, path):
         """Read retired runtime metadata from the append-only authority history."""
-        if path in self.entries or self.json(CONTROL + '/config.json', {}).get('schema_version', 0) < 6 or not self.commit:
+        since = self.store.issued_receipts.get(path)
+        if (path in self.entries or not self.commit or self.commit == since
+                or self.json(CONTROL + '/config.json', {}).get('schema_version', 0) < 6):
             return self
         safe_path(path)
         self.store.require_history()
@@ -165,7 +168,8 @@ class Snapshot:
             # A merge's first parent can hold a stale running record. Read the
             # original retirement commit, including those on merged branches.
             changed = git(self.store.repo, 'log', '--full-history', '--no-merges',
-                          '--no-patch', '--diff-filter=D', '-1', '--format=%H', self.commit, '--', ':(literal)' + path)
+                          '--no-patch', '--diff-filter=D', '-1', '--format=%H',
+                          self.commit, *(['^' + since] if since else []), '--', ':(literal)' + path)
             parents = git(self.store.repo, 'rev-list', '--parents', '-n', '1', changed).split() if changed else []
             previous = Snapshot(self.store, parents[1]) if len(parents) > 1 else self
             self._metadata_snapshots[path] = previous
@@ -194,6 +198,26 @@ class Store:
         self.transport = create(self.repo, remote, self.ref, transport_adapter)
         self.ref_prefix = "task-runtime"
         self._transport_checked = None
+        self.issued_ids = {}
+        self.issued_receipts = {}
+
+    def new_id(self, commit=None, prefix='', *, operation_prefix=''):
+        """Mint an ID after a fixed Git revision; reloaded IDs have no freshness hint."""
+        if commit is None:
+            tracking = 'refs/remotes/' + self.remote + '/' + self.ref.removeprefix('refs/heads/')
+            commit = git(self.repo, 'rev-parse', '--revs-only', tracking) or self.fetch(missing=True)
+        salted = digest([commit, uuid.uuid4().hex])[:32]
+        value = identity(prefix + uuid.UUID(hex=salted, version=4).hex)
+        if commit:
+            self.issued_ids[value] = commit
+            if operation_prefix is not None:
+                self.bind_new_operation(operation_prefix + value, commit)
+        return value
+
+    def bind_new_operation(self, operation_id, commit):
+        """A receipt for an operation derived from a new ID cannot predate issuance."""
+        for key in (identity(operation_id), reservation_id(operation_id)):
+            self.issued_receipts[f'{CONTROL}/operations/{key}.json'] = commit
 
     @contextmanager
     def lock(self, path, timeout=10):
