@@ -6,7 +6,7 @@ import sys
 import uuid
 
 from . import VERSION, completion, execution, leases, lifecycle, reports, runtime, task_io, signals
-from .store import GitFailure, Store, TaskError, encode, identity
+from .store import GitFailure, Store, TaskError, atomic_json, encode, identity
 
 
 def parser():
@@ -168,9 +168,35 @@ def report_operation(operation_id):
 
 def dispatch(args):
     store = Store(args.repo, args.remote, args.branch, transport_adapter=args.transport_adapter)
+    operation = identity(args.operation_id, "operation ID") if args.operation_id else None
+    admission = ((args.command == 'run' and args.action == 'start')
+                 or (args.command == 'execute' and not args.check))
+    if not admission:
+        return dispatch_operation(args, store, operation)
+
+    generated = operation is None
+    if generated:
+        operation = store.new_id()
+    intent = store.local / 'cli-admissions' / args.command / (operation + '.json')
+    if generated and operation in store.issued_ids:
+        atomic_json(intent, dict(operation_id=operation, allocation_commit=store.issued_ids[operation]))
+    else:
+        try:
+            saved = json.loads(intent.read_text())
+        except FileNotFoundError:
+            return dispatch_operation(args, store, operation)
+        if saved.get('operation_id') != operation:
+            raise TaskError('Saved CLI admission differs from the requested operation')
+        store.remember_allocation(operation, saved['allocation_commit'], operation_prefix='')
+    result = dispatch_operation(args, store, operation)
+    if not result.get('needs_attention'):
+        intent.unlink(missing_ok=True)
+    return result
+
+
+def dispatch_operation(args, store, operation):
     if args.command == "transport-check":
         return store.preflight()
-    operation = identity(args.operation_id, "operation ID") if args.operation_id else None
     if args.command == 'execute' and args.check:
         return execution.plan(store, args.task, condition_adapter=args.condition_adapter, force=args.force)
     if args.command == 'run' and args.action == 'heartbeat' and operation is None:

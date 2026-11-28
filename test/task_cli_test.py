@@ -6,8 +6,8 @@ import sys
 import unittest
 from unittest.mock import patch
 
-from task_runtime_test import ROOT, RuntimeCase, cli_json_lines
-from task_runtime import cli, completion, runtime
+from task_runtime_test import ROOT, RuntimeCase, cli_json_lines, unbounded_receipt_searches
+from task_runtime import cli, completion, git_support, runtime
 from task_runtime.store import GitFailure, TaskError
 from task_runtime.transport import DirectGit, TransportError
 
@@ -80,6 +80,20 @@ class CliTest(RuntimeCase):
         self.assertEqual(beat['sequence'], 1)
         replay, _ = self.invoke('run', 'heartbeat', '--task', 't', '--run-id', 'r', operation=operation_id)
         self.assertEqual(replay, beat)
+
+    def test_printed_start_id_survives_interruption_before_acceptance(self):
+        self.add()
+        arguments = ('run', 'start', '--task', 't', '--runner', 'worker')
+        with patch.object(runtime, 'start', side_effect=TaskError('Interrupted before acceptance')):
+            _, diagnostics = self.invoke(*arguments, operation=None, expected=1)
+        operation = diagnostics[0]['operation_id']
+        intent = self.sb.local / 'cli-admissions/run' / (operation + '.json')
+        self.assertEqual(json.loads(intent.read_text())['operation_id'], operation)
+        with patch.object(git_support, 'run_process', wraps=git_support.run_process) as commands:
+            admitted, _ = self.invoke(*arguments, operation=operation)
+        self.assertEqual(admitted['run_id'], operation)
+        self.assertEqual(unbounded_receipt_searches(commands, operation), [])
+        self.assertFalse(intent.exists())
 
     def test_inbox_run_completion_and_cleanup_commands_work_across_clones(self):
         self.add()

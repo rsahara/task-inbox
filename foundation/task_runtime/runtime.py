@@ -344,6 +344,9 @@ def start(store, operation_id, task_id, runner_id, *, run_id=None, machine_id=No
         lifecycle.reap(store, task_id, apply=True, observer_profile="stateless")
     def apply(snapshot):
         task, runtime = load_task(snapshot, task_id)
+        record_path = run_path(task_id, run_id, snapshot) + "/run.json"
+        if record_path in snapshot.entries:
+            raise TaskError("Run ID already exists; replay the original operation ID")
         if admission_check is not None:
             admission_check(snapshot)
         config = snapshot.json(CONTROL + "/config.json")
@@ -352,8 +355,7 @@ def start(store, operation_id, task_id, runner_id, *, run_id=None, machine_id=No
             raise TaskError("Migration is staged; activate after stopping and reconciling legacy writers")
         if task["status"] != "open":
             raise TaskError("Task is not open for new runs")
-        record_path = run_path(task_id, run_id, snapshot) + "/run.json"
-        if record_path in snapshot.entries or run_record(snapshot, task_id, run_id) is not None:
+        if run_record(snapshot, task_id, run_id) is not None:
             raise TaskError("Run ID already exists; replay the original operation ID")
         for slot in runtime["slots"].values():
             if slot.get("run_id"):

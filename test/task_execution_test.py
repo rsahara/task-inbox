@@ -111,6 +111,23 @@ class ExecutionTest(fixtures.RuntimeCase):
         finished = self.sb.snapshot().metadata(f'{CONTROL}/operations/{finish_id}.json')
         self.assertEqual(finished['result']['run_id'], run_id)
 
+    def test_resumed_selection_never_adopts_another_start_with_the_same_run_id(self):
+        self.setup_tasks(); self.send()
+        with patch.object(runtime, 'start', side_effect=TaskError('Interrupted before start')), \
+                self.assertRaisesRegex(TaskError, 'Interrupted before start'):
+            self.execute('saved')
+        selection_id = execution.operation('saved', 'select', 0)
+        choice = self.sa.snapshot().metadata(f'{CONTROL}/operations/{selection_id}.json')['result']
+        run_id = choice['run_id']
+        foreign = runtime.start(self.sb, 'another-start', 't', 'another-runner', run_id=run_id)
+        with patch.object(lifecycle, 'execute', side_effect=AssertionError('Launched another run')), \
+                self.assertRaisesRegex(TaskError, 'Run ID already exists'):
+            self.execute('saved')
+        current = runtime.check(self.sb, 't', run_id)
+        self.assertEqual(current['generation'], foreign['generation'])
+        self.assertEqual(current['runner_id'], 'another-runner')
+        self.assertNotIn('execution_claim', current)
+
     def test_signal_delivery_never_launches_consumers(self):
         self.setup_tasks('a', 'b', 'excluded')
         signals.subscribe(self.sa, 'subscribe-b', 'a', 'b')

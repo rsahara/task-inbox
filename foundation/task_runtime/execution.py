@@ -202,7 +202,6 @@ def execute(store, execution_id, task_ids, runner, executor, *, condition_adapte
             if task_id is None:
                 reason = 'no_ready_task'
                 break
-            just_allocated = run_id in store.issued_ids
             if 'start_operation' in choice:
                 start_id, finish_id = choice['start_operation'], choice['finish_operation']
                 issued_at = choice['plan']['commit']
@@ -212,31 +211,28 @@ def execute(store, execution_id, task_ids, runner, executor, *, condition_adapte
             else:
                 start_id = operation(execution_id, 'start', index)
                 finish_id = operation(execution_id, 'finish', index)
-            current = None if just_allocated else runtime.run_record(store.snapshot(), task_id, run_id)
-            if current is not None:
-                store.issued_ids.pop(run_id, None)
-            if current is None:
-                def recheck(snapshot):
-                    decision = plan(store, [task_id], condition_adapter=checker,
-                                    force=force and index == 0 and task_id == task_ids[0],
-                                    used=used, snapshot=snapshot)['decisions'][0]
-                    if not decision['ready']:
-                        raise TaskError('Execution admission changed: ' + decision['reason'])
+            def recheck(snapshot):
+                decision = plan(store, [task_id], condition_adapter=checker,
+                                force=force and index == 0 and task_id == task_ids[0],
+                                used=used, snapshot=snapshot)['decisions'][0]
+                if not decision['ready']:
+                    raise TaskError('Execution admission changed: ' + decision['reason'])
 
-                try:
-                    runtime.start(store, start_id, task_id, runner,
-                                  run_id=run_id, admission_check=recheck,
-                                  admission_key=operation(execution_id, 'select', index),
-                                  completion_contract=contracts.get(task_id))
-                except TaskError as error:
-                    if str(error).startswith('Execution admission changed: '):
-                        reason = str(error).split(': ', 1)[1]
-                        break
-                    if str(error) != 'Task runner limit reached':
-                        raise
-                    reason = 'busy'
+            try:
+                admitted = runtime.start(store, start_id, task_id, runner, run_id=run_id,
+                                         admission_check=recheck, admission_key=operation(execution_id, 'select', index),
+                                         completion_contract=contracts.get(task_id))
+            except TaskError as error:
+                if str(error).startswith('Execution admission changed: '):
+                    reason = str(error).split(': ', 1)[1]
                     break
-                current = runtime.load_run(store.snapshot(), task_id, run_id)[2]
+                if str(error) != 'Task runner limit reached':
+                    raise
+                reason = 'busy'
+                break
+            current = runtime.load_run(store.snapshot(), task_id, run_id)[2]
+            if (current['generation'], current['runner_id']) != (admitted['generation'], admitted['runner_id']):
+                raise TaskError('Run ownership differs from the saved execution admission')
             if current['status'] != 'running':
                 if current['status'] in ('succeeded', 'failed', 'cancelled'):
                     signals.require_delivery(signals.sync(store, task_id=task_id))
