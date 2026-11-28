@@ -17,6 +17,8 @@ class MetadataRetirementTest(RuntimeCase):
             started = self.start(run_id, store=self.sb)
         history = [call.args[0] for call in commands.call_args_list if 'log' in call.args[0]]
         self.assertEqual(history, [])
+        self.assertNotIn(run_id, self.sb.issued_ids)
+        self.assertFalse(self.sb.issued_receipts)
         self.assertEqual(started['generation'], 2)
         with patch.object(layout, 'previous_locations', side_effect=AssertionError('live run')):
             self.assertIsNone(runtime.run_metadata(self.sb.snapshot(), 't', run_id, 'cleanup.json'))

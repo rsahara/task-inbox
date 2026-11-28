@@ -62,6 +62,8 @@ def execute(store, task_id, run_id, command, *, worker_finish=False):
                         "launch_id": record["launch_id"]}, claim)
         heartbeat_id = record.get("starting_heartbeat_id", "execution-starting-" + record["launch_id"])
         for attempt in range(8):
+            if run["execution"]["recovery_mode"] in leases.MODES and run.get("definition_commit"):
+                store.bind_new_operation(heartbeat_id, run["definition_commit"])
             try:
                 runtime.heartbeat(store, task_id, run_id, progress="starting", operation_id=heartbeat_id)
                 break

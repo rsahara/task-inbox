@@ -367,9 +367,19 @@ class Store:
         from .transport import TransportError
         identity(operation_id, "operation ID")
         receipt_path = f"{CONTROL}/operations/{operation_id}.json"
+        reservation_path = f"{CONTROL}/operations/{reservation_id(operation_id)}.json"
         journal = self.local / "operations" / (operation_id + ".json")
         retention_ref = "refs/task-runtime-pending/" + self.local.name + "/" + operation_id
         fingerprint = digest(request)
+        def confirmed_result(state, receipt):
+            state.update(done=True, receipt=receipt)
+            atomic_json(journal, state)
+            git(self.repo, "update-ref", "-d", retention_ref)
+            self.issued_ids.pop(operation_id, None)
+            self.issued_receipts.pop(receipt_path, None)
+            self.issued_receipts.pop(reservation_path, None)
+            return dict(receipt["result"], operation_id=operation_id, committed=True)
+
         with self.lock(journal.with_suffix(".lock")):
             state = json.loads(journal.read_text()) if journal.exists() else {"request_hash": fingerprint}
             if state["request_hash"] != fingerprint:
@@ -383,14 +393,11 @@ class Store:
                 if receipt:
                     if receipt["request_hash"] != fingerprint:
                         raise TaskError("Operation ID was already used for another request")
-                    state.update(done=True, receipt=receipt)
-                    atomic_json(journal, state)
-                    git(self.repo, "update-ref", "-d", retention_ref)
-                    return dict(receipt["result"], operation_id=operation_id, committed=True)
+                    return confirmed_result(state, receipt)
                 # Multi-ref operations reserve their public identity before
                 # writing a candidate elsewhere. Every authority mutation must
                 # honor that binding, including after receipt retirement/GC.
-                reservation = snapshot.metadata(CONTROL + '/operations/' + reservation_id(operation_id) + '.json')
+                reservation = snapshot.metadata(reservation_path)
                 if reservation:
                     bound = reservation.get('result', {})
                     if bound.get('reserved_operation') != operation_id or bound.get('request_hash') != fingerprint:
@@ -481,10 +488,7 @@ class Store:
                     remote = Snapshot(self, self.fetch())
                     found = remote.metadata(receipt_path)
                     if found and found["request_hash"] == fingerprint and self.contains(remote.commit, candidate):
-                        state.update(done=True, receipt=found)
-                        atomic_json(journal, state)
-                        git(self.repo, "update-ref", "-d", retention_ref)
-                        return dict(found["result"], operation_id=operation_id, committed=True)
+                        return confirmed_result(state, found)
                     if (attempt_ref and remote.commit != tip and self.contains(remote.commit, tip) and
                             not self.contains(remote.commit, candidate)):
                         raise SupersededRenewal("Frozen renewal was superseded; check ownership before using a new operation ID") from None
@@ -505,8 +509,5 @@ class Store:
                     continue
                 if not found or found["request_hash"] != fingerprint or not self.contains(confirmed.commit, candidate):
                     raise TaskError("Publication readback failed; retain operation " + operation_id)
-                state.update(done=True, receipt=found)
-                atomic_json(journal, state)
-                git(self.repo, "update-ref", "-d", retention_ref)
-                return dict(found["result"], operation_id=operation_id, committed=True)
+                return confirmed_result(state, found)
             raise TaskError("Concurrent updates exceeded retry limit; retry operation " + operation_id)

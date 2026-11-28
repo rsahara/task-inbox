@@ -352,7 +352,8 @@ def start(store, operation_id, task_id, runner_id, *, run_id=None, machine_id=No
             raise TaskError("Migration is staged; activate after stopping and reconciling legacy writers")
         if task["status"] != "open":
             raise TaskError("Task is not open for new runs")
-        if run_record(snapshot, task_id, run_id) is not None:
+        record_path = run_path(task_id, run_id, snapshot) + "/run.json"
+        if record_path in snapshot.entries or run_record(snapshot, task_id, run_id) is not None:
             raise TaskError("Run ID already exists; replay the original operation ID")
         for slot in runtime["slots"].values():
             if slot.get("run_id"):
@@ -403,7 +404,7 @@ def start(store, operation_id, task_id, runner_id, *, run_id=None, machine_id=No
         if config['schema_version'] < 9:
             runtime['slots'][free].update(runner_id=runner_id, machine_id=machine_id)
         changes.update({root(task_id, snapshot) + "/runtime.json": encode(runtime),
-                        run_path(task_id, run_id, snapshot) + "/run.json": encode(run)})
+                        record_path: encode(run)})
         return changes, run
     admitted = store.transact(operation_id, request, apply)
     store.issued_ids.pop(run_id, None)
@@ -861,7 +862,7 @@ def heartbeat(store, task_id, run_id, *, progress=None, operation_id=None):
     if current["execution"]["recovery_mode"] in leases.MODES:
         for attempt in range(8):
             try:
-                leases.renew(store, operation_id or uuid.uuid4().hex, task_id, run_id)
+                leases.renew(store, operation_id or store.new_id(snapshot.commit), task_id, run_id)
                 break
             except SupersededRenewal:
                 # A supervisor can issue a new renewal only after exact CAS
