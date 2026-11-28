@@ -265,7 +265,8 @@ def _result(store, operation_id, task_id, run_id, message_id, value):
 
 def emit(store, operation_id, task_id, run_id, event_id, kind, payload, *, authority=None):
     """Immutable run events include external-operation intents and their reconciled outcomes."""
-    authority, run = runtime.checked_run_snapshot(store, task_id, run_id, snapshot=authority)
+    authority = authority or store.snapshot()
+    run = runtime.check(store, task_id, run_id, snapshot=authority)
     event = dict(schema_version=1, id=identity(event_id), kind=identity(kind), payload=bounded(payload),
                  task_id=task_id, run_id=run_id, generation=run['generation'])
     from . import main_io

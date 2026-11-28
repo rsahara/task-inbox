@@ -124,7 +124,13 @@ class ExecutionTest(fixtures.RuntimeCase):
                       admission_key=selected, admission_check=lambda snapshot: None)
         expected = [dict(task_id='t', run_id=run_id, outcome='succeeded')]
         self.assertEqual(self.execute('mixed')['steps'], expected)
-        self.assertEqual(self.execute('mixed', store=self.sb)['steps'], expected)
+        guard = leases.guard
+        def unavailable_for_new_admission(store, snapshot, request):
+            if request['kind'] == 'run-start':
+                raise TaskError('Trusted clock unavailable for a new admission')
+            return guard(store, snapshot, request)
+        with patch.object(leases, 'guard', side_effect=unavailable_for_new_admission):
+            self.assertEqual(self.execute('mixed', store=self.sb)['steps'], expected)
         finish = execution.operation('mixed', 'finish', 0)
         self.assertEqual(self.sa.snapshot().metadata(f'{CONTROL}/operations/{finish}.json')['result']['run_id'], run_id)
 
