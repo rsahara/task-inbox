@@ -42,9 +42,13 @@ def execute(store, task_id, run_id, command, *, worker_finish=False):
                     or record.get("executor") != executor or record.get("command_hash") != command_hash):
                 raise TaskError("Retry the original execution claim on the same executor with the same run and command")
             identity(record.get("launch_id"), "launch ID")
+            if "claim_operation" in record:
+                store.bind_new_operation(record["claim_operation"], run["definition_commit"])
         else:
+            claim_operation = store.new_id(prefix="execution-claim-")
             record = {"run_id": run_id, "generation": run["generation"], "phase": "claiming",
-                      "launch_id": uuid.uuid4().hex, "executor": executor, "command_hash": command_hash,
+                      "launch_id": claim_operation.removeprefix("execution-claim-"), "claim_operation": claim_operation,
+                      "executor": executor, "command_hash": command_hash,
                       "started_at": now()}
             atomic_json(marker, record)
         # The local marker alone cannot exclude a second clone. Consume one
@@ -57,7 +61,9 @@ def execute(store, task_id, run_id, command, *, worker_finish=False):
             current["execution_claim"] = {"launch_id": record["launch_id"], "claimed_at": now(),
                                           "generation": current["generation"]}
             return {runtime.run_path(task_id, run_id, snapshot) + "/run.json": encode(current)}, current["execution_claim"]
-        store.transact(digest(["run-execution", task_id, run_id])[:48],
+        # Older claiming markers resume their original per-run transaction.
+        operation_id = record.get("claim_operation") or digest(["run-execution", task_id, run_id])[:48]
+        store.transact(operation_id,
                        {"kind": "run-execution", "task_id": task_id, "run_id": run_id,
                         "launch_id": record["launch_id"]}, claim)
         heartbeat_id = record.get("starting_heartbeat_id", "execution-starting-" + record["launch_id"])

@@ -252,6 +252,8 @@ fails during claim or starting heartbeat, the original executor can repeat
 `exec` with the same command, Git directory and execution lock while the receipt
 is in `claiming`. Copying a receipt to a different clone cannot transfer this
 authorization. The retry reuses the same launch ID and authority transaction.
+New claiming markers save a random claim operation ID before contacting the
+authority. Earlier markers continue with their original per-run operation ID.
 An uncertain starting heartbeat keeps its operation ID. If a generation-timeout
 renewal definitively loses its Git compare-and-swap, the supervisor rechecks
 ownership and saves a new heartbeat operation ID before retrying. Before a

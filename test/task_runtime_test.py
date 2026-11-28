@@ -17,8 +17,8 @@ import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "foundation"))
-from task_runtime import cli, lifecycle, runtime, task_io
-from task_runtime.store import CONTROL, GitFailure, Snapshot, Store, TaskError, atomic_json, digest, encode
+from task_runtime import cli, git_support, lifecycle, runtime, task_io
+from task_runtime.store import CONTROL, GitFailure, Snapshot, Store, TaskError, atomic_json, digest, encode, reservation_id
 
 
 def cli_json_lines(value):
@@ -900,8 +900,13 @@ class TaskRuntimeTest(RuntimeCase):
             original(ref, candidate, expected)
             if ref == self.sa.ref:
                 raise GitFailure("lost response", {"definite_rejection": False})
-        with patch.object(self.sa, "push", side_effect=lose_reply):
-            self.assertEqual(lifecycle.execute(self.sa, "t", "r", command)["exit_code"], 0)
+        with patch.object(self.sa, "push", side_effect=lose_reply), \
+                patch.object(git_support, "run_process", wraps=git_support.run_process) as commands:
+            executed = lifecycle.execute(self.sa, "t", "r", command)
+        self.assertEqual(executed["exit_code"], 0)
+        operation = executed["claim_operation"]
+        paths = {f":(literal){CONTROL}/operations/{key}.json" for key in (operation, reservation_id(operation))}
+        self.assertFalse(any("log" in call.args[0] and call.args[0][-1] in paths for call in commands.call_args_list))
         with self.assertRaises(TaskError):
             lifecycle.execute(self.sb, "t", "r", command)
         self.assertEqual(launched.read_text(), "launch\n")
@@ -914,10 +919,14 @@ class TaskRuntimeTest(RuntimeCase):
         launched = self.base / "launches"
         command = [sys.executable, "-c", "from pathlib import Path; import sys; Path(sys.argv[1]).touch()", str(launched)]
         original = self.sa.transact
+        def save_legacy_marker(path, record):
+            record.pop("claim_operation", None)
+            atomic_json(path, record)
         def disappear(*args, **kwargs):
             original(*args, **kwargs)
             raise TaskError("Owner disappeared after claiming execution")
-        with patch.object(self.sa, "transact", side_effect=disappear), self.assertRaises(TaskError):
+        with patch.object(lifecycle, "atomic_json", side_effect=save_legacy_marker), \
+                patch.object(self.sa, "transact", side_effect=disappear), self.assertRaises(TaskError):
             lifecycle.execute(self.sa, "t", "r", command)
         with self.assertRaises(TaskError):
             lifecycle.execute(self.sb, "t", "r", command)

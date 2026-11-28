@@ -8,10 +8,12 @@ from task_runtime.store import CONTROL, GitFailure, Snapshot, Store, TaskError, 
 class MetadataRetirementTest(RuntimeCase):
     def test_new_run_and_start_receipt_skip_history_on_an_idle_task(self):
         self.add()
+        tracking_tip = self.sb.fetch()
         self.start(); self.prepare()
         runtime.publish(self.sa, 'old-finish', 't', 'r', outcome='succeeded')
-        issued = self.sb.fetch()
-        run_id = self.sb.new_id(issued, 'worker-', operation_prefix='start-')
+        self.git(self.b, 'update-ref', 'refs/remotes/origin/main', tracking_tip)
+        self.assertNotEqual(tracking_tip, self.sb.fetch())
+        run_id = self.sb.new_id(prefix='worker-', operation_prefix='start-')
         with patch.object(git_support, 'run_process', wraps=git_support.run_process) as commands, \
                 patch.object(lifecycle, 'reap', side_effect=AssertionError('no occupied slots')):
             started = self.start(run_id, store=self.sb)

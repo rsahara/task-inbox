@@ -30,12 +30,14 @@ authority commit deletes the run's `run.json`, any legacy/recovery `result.json`
 not execution metadata and are preserved.
 
 Late retries and recovery read the original records from ordinary main history.
-The allocator mixes a fixed Git revision with a random nonce. The issuing
+The allocator mixes a fixed Git revision with a random nonce. It uses a
+caller-provided snapshot or reads the authority ref at issuance. The issuing
 process checks current records and can bound receipt lookup to changes since
 that revision. An unchanged task definition and slot registry rule out an
 intervening admission. A saved or caller-supplied ID has the usual historical
 replay and collision checks, including after a task moves or a run is retired.
-This prevents run/operation ID reuse without a permanent per-run receipt or tag.
+Fresh IDs rely on randomness for uniqueness before issuance. Retired records
+can be recovered without a permanent per-run receipt or tag.
 History is not rewritten. Complete authority ancestry is required: direct Git
 fetches automatically unshallow the repository; external transports must import
 the complete ancestry and fail closed when it is unavailable.

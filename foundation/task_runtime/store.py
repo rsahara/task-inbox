@@ -204,8 +204,7 @@ class Store:
     def new_id(self, commit=None, prefix='', *, operation_prefix=''):
         """Mint an ID after a fixed Git revision; reloaded IDs have no freshness hint."""
         if commit is None:
-            tracking = 'refs/remotes/' + self.remote + '/' + self.ref.removeprefix('refs/heads/')
-            commit = git(self.repo, 'rev-parse', '--revs-only', tracking) or self.fetch(missing=True)
+            commit = self.remote_tip(self.ref)
         salted = digest([commit, uuid.uuid4().hex])[:32]
         value = identity(prefix + uuid.UUID(hex=salted, version=4).hex)
         if commit:
