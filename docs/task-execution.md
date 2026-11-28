@@ -179,9 +179,10 @@ selection decisions use ordinary immutable authority operation receipts, without
 an additional dispatch queue or claim database. The begin receipt binds the task
 selection, runner and adapter file hashes. Changing an
 adapter or policy requires reconciling that invocation before using a new one.
-Selection saves the allocated run ID alongside the input plan. Each step has
-deterministic admission and finish operation IDs. A retry uses the saved choice,
-including choices written by earlier versions.
+Selection saves the allocated run ID, its admission and finish operation IDs,
+and the input plan at the allocation commit. A retry reuses these IDs and can
+limit their lookup to the run's lifetime, even with a caller-supplied execution
+ID. Earlier selections retain their original invocation-derived operation IDs.
 
 A previously finished step is read back, its signal delivery and normal cleanup
 are reconciled, and it is never relaunched. A surviving local

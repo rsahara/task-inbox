@@ -34,8 +34,9 @@ The allocator mixes a fixed Git revision with a random nonce. It uses a
 caller-provided snapshot or reads the authority ref at issuance. The issuing
 process checks current records and can bound receipt lookup to changes since
 that revision. An unchanged task definition and slot registry rule out an
-intervening admission. A saved or caller-supplied ID has the usual historical
-replay and collision checks, including after a task moves or a run is retired.
+intervening admission. An intent that saves the allocation commit with its ID
+can restore this bound on retry. Caller-supplied IDs and older intents retain
+historical replay and collision checks, including after a task moves or a run is retired.
 Fresh IDs rely on randomness for uniqueness before issuance. Retired records
 can be recovered without a permanent per-run receipt or tag.
 History is not rewritten. Complete authority ancestry is required: direct Git

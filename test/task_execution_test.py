@@ -9,8 +9,8 @@ from unittest.mock import patch
 
 import task_runtime_test as fixtures
 import task_lease_test as shared
-from task_runtime import execution, interfaces, leases, lifecycle, runtime, signals, task_io
-from task_runtime.store import GitFailure, TaskError, atomic_json, digest
+from task_runtime import execution, git_support, interfaces, leases, lifecycle, runtime, signals, task_io
+from task_runtime.store import CONTROL, GitFailure, TaskError, atomic_json, digest
 
 
 def declaration(readiness='inbox', inbox=None, reads=None):
@@ -80,6 +80,36 @@ class ExecutionTest(fixtures.RuntimeCase):
         self.assertEqual(self.execute(store=self.sb)['steps'], result['steps'])
         with self.assertRaisesRegex(TaskError, 'another request'):
             self.execute(force=True)
+
+    def test_saved_selection_bounds_start_for_a_stable_caller_id_from_another_clone(self):
+        self.setup_tasks(); self.send()
+        with patch.object(runtime, 'start', side_effect=TaskError('Interrupted before admission')), \
+                self.assertRaisesRegex(TaskError, 'Interrupted before admission'):
+            self.execute('stable')
+        start = runtime.start
+        def admit(store, operation_id, *args, **kwargs):
+            with patch.object(git_support, 'run_process', wraps=git_support.run_process) as commands:
+                run = start(store, operation_id, *args, **kwargs)
+            self.assertEqual(fixtures.unbounded_receipt_searches(commands, operation_id), [])
+            return run
+        with patch.object(runtime, 'start', side_effect=admit):
+            result = self.execute('stable', store=self.sb)
+        self.assertEqual(result['steps'][0]['outcome'], 'succeeded')
+        self.assertEqual(self.execute('stable')['steps'], result['steps'])
+
+    def test_legacy_selection_keeps_invocation_derived_operations(self):
+        self.setup_tasks(); self.send()
+        execution_id = 'legacy'
+        selected = execution.operation(execution_id, 'select', 0)
+        run_id = 'execute-' + digest([execution_id, 0])[:40]
+        self.sa.transact(selected, dict(kind='execution-select', execution_id=execution_id, index=0),
+                         lambda snapshot: ({}, dict(plan=execution.plan(self.sa, ['t'], snapshot=snapshot),
+                                                     task_id='t', run_id=run_id)))
+        result = self.execute(execution_id, store=self.sb)
+        self.assertEqual(result['steps'], [dict(task_id='t', run_id=run_id, outcome='succeeded')])
+        finish_id = execution.operation(execution_id, 'finish', 0)
+        finished = self.sb.snapshot().metadata(f'{CONTROL}/operations/{finish_id}.json')
+        self.assertEqual(finished['result']['run_id'], run_id)
 
     def test_signal_delivery_never_launches_consumers(self):
         self.setup_tasks('a', 'b', 'excluded')

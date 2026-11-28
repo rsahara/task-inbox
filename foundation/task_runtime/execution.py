@@ -147,7 +147,10 @@ def select(store, execution_id, index, task_ids, *, condition_adapter, force, us
         target = next((d for d in decision['decisions'] if d['ready']), None)
         run_id = (store.new_id(snapshot.commit, 'execute-', operation_prefix=None) if target
                   else 'execute-' + digest([execution_id, index])[:40])
-        return {}, dict(plan=decision, task_id=target['task_id'] if target else None, run_id=run_id)
+        choice = dict(plan=decision, task_id=target['task_id'] if target else None, run_id=run_id)
+        if target:
+            choice.update(start_operation='start-' + run_id, finish_operation='finish-' + run_id)
+        return {}, choice
 
     return store.transact(selection_id, request, apply)
 
@@ -185,7 +188,7 @@ def execute(store, execution_id, task_ids, runner, executor, *, condition_adapte
     # The shared operation receipt is the caller intent. No separate application
     # lock, mutable routing queue or host-specific launch state is needed.
     if execution_id in store.issued_ids:
-        for phase, index in (('begin', None), ('select', 0), ('start', 0), ('finish', 0)):
+        for phase, index in (('begin', None), ('select', 0)):
             store.bind_new_operation(operation(execution_id, phase, index), store.issued_ids[execution_id])
     store.transact(operation(execution_id, 'begin'), request, lambda snapshot: ({}, {'execution_id': execution_id}))
     steps, used = [], []
@@ -199,7 +202,19 @@ def execute(store, execution_id, task_ids, runner, executor, *, condition_adapte
             if task_id is None:
                 reason = 'no_ready_task'
                 break
-            current = None if run_id in store.issued_ids else runtime.run_record(store.snapshot(), task_id, run_id)
+            just_allocated = run_id in store.issued_ids
+            if 'start_operation' in choice:
+                start_id, finish_id = choice['start_operation'], choice['finish_operation']
+                issued_at = choice['plan']['commit']
+                store.remember_allocation(run_id, issued_at)
+                for key in (start_id, finish_id):
+                    store.bind_new_operation(key, issued_at)
+            else:
+                start_id = operation(execution_id, 'start', index)
+                finish_id = operation(execution_id, 'finish', index)
+            current = None if just_allocated else runtime.run_record(store.snapshot(), task_id, run_id)
+            if current is not None:
+                store.issued_ids.pop(run_id, None)
             if current is None:
                 def recheck(snapshot):
                     decision = plan(store, [task_id], condition_adapter=checker,
@@ -209,7 +224,7 @@ def execute(store, execution_id, task_ids, runner, executor, *, condition_adapte
                         raise TaskError('Execution admission changed: ' + decision['reason'])
 
                 try:
-                    runtime.start(store, operation(execution_id, 'start', index), task_id, runner,
+                    runtime.start(store, start_id, task_id, runner,
                                   run_id=run_id, admission_check=recheck,
                                   admission_key=operation(execution_id, 'select', index),
                                   completion_contract=contracts.get(task_id))
@@ -257,7 +272,7 @@ def execute(store, execution_id, task_ids, runner, executor, *, condition_adapte
                 steps.append(dict(task_id=task_id, run_id=run_id, outcome='unknown'))
                 break
             value = worker_result(result_path, current)
-            runtime.publish(store, operation(execution_id, 'finish', index), task_id, run_id,
+            runtime.publish(store, finish_id, task_id, run_id,
                             outcome=value['outcome'], summary=value['summary'],
                             completion_record=value.get('completion'), input_results=value.get('input_results'))
             saved = runtime.load_run(store.snapshot(), task_id, run_id)[2]

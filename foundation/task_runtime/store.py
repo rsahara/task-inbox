@@ -202,16 +202,22 @@ class Store:
         self.issued_receipts = {}
 
     def new_id(self, commit=None, prefix='', *, operation_prefix=''):
-        """Mint an ID after a fixed Git revision; reloaded IDs have no freshness hint."""
+        """Mint an ID after a fixed authority revision."""
         if commit is None:
             commit = self.remote_tip(self.ref)
         salted = digest([commit, uuid.uuid4().hex])[:32]
         value = identity(prefix + uuid.UUID(hex=salted, version=4).hex)
         if commit:
-            self.issued_ids[value] = commit
-            if operation_prefix is not None:
-                self.bind_new_operation(operation_prefix + value, commit)
+            self.remember_allocation(value, commit, operation_prefix=operation_prefix)
         return value
+
+    def remember_allocation(self, value, commit, *, operation_prefix=None):
+        """Restore the issuance bound saved with an allocator-generated ID."""
+        if not isinstance(commit, str) or not re.fullmatch(r'(?:[0-9a-f]{40}|[0-9a-f]{64})', commit):
+            raise TaskError('Invalid allocation commit')
+        self.issued_ids[identity(value)] = commit
+        if operation_prefix is not None:
+            self.bind_new_operation(operation_prefix + value, commit)
 
     def bind_new_operation(self, operation_id, commit):
         """A receipt for an operation derived from a new ID cannot predate issuance."""

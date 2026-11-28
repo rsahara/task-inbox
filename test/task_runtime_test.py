@@ -21,6 +21,16 @@ from task_runtime import cli, git_support, lifecycle, runtime, task_io
 from task_runtime.store import CONTROL, GitFailure, Snapshot, Store, TaskError, atomic_json, digest, encode, reservation_id
 
 
+def unbounded_receipt_searches(commands, operation_id):
+    paths = {f":(literal){CONTROL}/operations/{key}.json" for key in (operation_id, reservation_id(operation_id))}
+    matches = []
+    for call in commands.call_args_list:
+        argv = call.args[0]
+        if 'log' in argv and argv[-1] in paths and not any(arg.startswith('^') for arg in argv):
+            matches.append(argv)
+    return matches
+
+
 def cli_json_lines(value):
     """Keep strict JSON assertions while exposing no captured output on failure."""
     result = []
