@@ -95,6 +95,38 @@ class CliTest(RuntimeCase):
         self.assertEqual(unbounded_receipt_searches(commands, operation), [])
         self.assertFalse(intent.exists())
 
+    def test_wake_retries_its_printed_id_without_scanning_retired_runs(self):
+        self.add('other'); self.start(task='other')
+        self.add()
+        arguments = ('io', 'wake', '--task', 't', '--runner', 'worker', '--force')
+        with patch.object(runtime, 'start', side_effect=TaskError('Interrupted before acceptance')):
+            _, diagnostics = self.invoke(*arguments, operation=None, expected=1)
+        operation = diagnostics[0]['operation_id']
+        with patch.object(git_support, 'run_process', wraps=git_support.run_process) as commands:
+            result, _ = self.invoke(*arguments, operation=operation)
+        self.assertEqual(result['run']['run_id'], operation)
+        unbounded = [call.args[0] for call in commands.call_args_list if '--full-history' in call.args[0]
+                     and not any(arg.startswith('^') for arg in call.args[0])]
+        self.assertEqual(unbounded, [])
+        self.assertFalse((self.sb.local / 'cli-admissions/io' / (operation + '.json')).exists())
+
+    def test_generated_stream_io_ids_use_the_existing_authority_read(self):
+        self.add(); self.start()
+        payload = self.base / 'payload.json'
+        payload.write_text('{}')
+        read_ref = DirectGit.read_ref
+        def read(transport, ref):
+            if ref == self.sa.ref:
+                raise AssertionError('Stream operation queried main to allocate an ID')
+            return read_ref(transport, ref)
+        with patch.object(DirectGit, 'read_ref', read):
+            sent, _ = self.invoke('io', 'send', '--task', 't', '--message-id', 'one', '--kind', 'work',
+                                  '--payload-file', str(payload), operation=None)
+            event, _ = self.invoke('io', 'emit', '--task', 't', '--run-id', 'r', '--event-id', 'one',
+                                   '--kind', 'work', '--payload-file', str(payload), operation=None)
+        self.assertTrue(sent['accepted'])
+        self.assertEqual(event['id'], 'one')
+
     def test_inbox_run_completion_and_cleanup_commands_work_across_clones(self):
         self.add()
         payload = self.base / 'payload.json'

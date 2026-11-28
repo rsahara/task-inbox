@@ -37,7 +37,7 @@ that revision. An unchanged task definition and slot registry rule out an
 intervening admission. An intent that saves the allocation commit with its ID
 can restore this bound on retry. Caller-supplied IDs and older intents retain
 historical replay and collision checks, including after a task moves or a run is retired.
-For automatically generated `run start` and `execute` IDs, the CLI saves the
+For automatically generated `run start`, `io wake` and `execute` IDs, the CLI saves the
 allocation commit in the clone before printing the ID. A retry in that clone
 uses the saved bound until the admission or execution is confirmed. A clone
 without the local intent can reconcile the same ID from authority history.

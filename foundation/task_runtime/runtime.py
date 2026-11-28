@@ -423,9 +423,9 @@ def has_reapable_slots(snapshot, task_id):
     return bool(task and task['execution']['recovery_mode'] in leases.MODES)
 
 
-def checked_run_snapshot(store, task_id, run_id):
+def checked_run_snapshot(store, task_id, run_id, *, snapshot=None):
     from . import leases
-    snapshot = store.snapshot()
+    snapshot = snapshot or store.snapshot()
     run = load_run(snapshot, task_id, run_id, live=True)[2]
     if run["execution"]["recovery_mode"] in leases.MODES:
         leases.guard(store, snapshot, dict(kind="run-check", task_id=task_id, run_id=run_id))

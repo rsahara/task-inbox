@@ -168,14 +168,21 @@ def report_operation(operation_id):
 
 def dispatch(args):
     store = Store(args.repo, args.remote, args.branch, transport_adapter=args.transport_adapter)
+    if args.command == "transport-check":
+        return store.preflight()
     operation = identity(args.operation_id, "operation ID") if args.operation_id else None
-    admission = ((args.command == 'run' and args.action == 'start')
-                 or (args.command == 'execute' and not args.check))
-    if not admission:
-        return dispatch_operation(args, store, operation)
-
     generated = operation is None
-    if generated:
+    admission = ((args.command == 'run' and args.action == 'start')
+                 or (args.command == 'io' and args.action == 'wake')
+                 or (args.command == 'execute' and not args.check))
+    io_snapshot = None
+    if generated and args.command == 'io' and args.action in ('send', 'complete', 'emit', 'wake'):
+        io_snapshot = store.snapshot()
+        operation = store.new_id(io_snapshot.commit)
+    if not admission:
+        return dispatch_operation(args, store, operation, io_snapshot)
+
+    if operation is None:
         operation = store.new_id()
     intent = store.local / 'cli-admissions' / args.command / (operation + '.json')
     if generated and operation in store.issued_ids:
@@ -184,19 +191,17 @@ def dispatch(args):
         try:
             saved = json.loads(intent.read_text())
         except FileNotFoundError:
-            return dispatch_operation(args, store, operation)
+            return dispatch_operation(args, store, operation, io_snapshot)
         if saved.get('operation_id') != operation:
             raise TaskError('Saved CLI admission differs from the requested operation')
         store.remember_allocation(operation, saved['allocation_commit'], operation_prefix='')
-    result = dispatch_operation(args, store, operation)
+    result = dispatch_operation(args, store, operation, io_snapshot)
     if not result.get('needs_attention'):
         intent.unlink(missing_ok=True)
     return result
 
 
-def dispatch_operation(args, store, operation):
-    if args.command == "transport-check":
-        return store.preflight()
+def dispatch_operation(args, store, operation, io_snapshot):
     if args.command == 'execute' and args.check:
         return execution.plan(store, args.task, condition_adapter=args.condition_adapter, force=args.force)
     if args.command == 'run' and args.action == 'heartbeat' and operation is None:
@@ -235,18 +240,19 @@ def dispatch_operation(args, store, operation):
                                    subscriptions=json.loads(Path(args.subscriptions_file).read_text()) if args.subscriptions_file else None)
         if args.action == 'send':
             return task_io.send(store, operation, args.task, args.message_id, args.kind,
-                                json.loads(Path(args.payload_file).read_text()))
+                                json.loads(Path(args.payload_file).read_text()), authority=io_snapshot)
         if args.action == 'pending':
             return task_io.pending(store, args.task)
         if args.action == 'status':
             return task_io.status(store, args.task, args.message_id)
         if args.action == 'complete':
             return task_io.complete(store, operation, args.task, args.run_id, args.message_id,
-                                  json.loads(Path(args.result_file).read_text()))
+                                    json.loads(Path(args.result_file).read_text()), authority=io_snapshot)
         if args.action == 'emit':
             return task_io.emit(store, operation, args.task, args.run_id, args.event_id, args.kind,
-                                json.loads(Path(args.payload_file).read_text()))
-        return task_io.wake(store, operation, args.task, args.runner, args.run_id, force=args.force)
+                                json.loads(Path(args.payload_file).read_text()), authority=io_snapshot)
+        return task_io.wake(store, operation, args.task, args.runner, args.run_id,
+                            force=args.force, authority=io_snapshot)
     if args.command == "task":
         if args.action == "recovery-policy":
             return leases.configure(store, operation, args.id, args.expected_revision, mode=args.mode,
